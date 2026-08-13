@@ -218,11 +218,9 @@ def _run_engine(
                 # Check if job was cancelled
                 job = job_service.get_job(job_id)
                 if job and job.get("status") == "cancelling":
-                    # Already marked cancelling; we'll mark cancelled via the cancel endpoint
-                    # But if the process exited due to cancellation, ensure it's cancelled
-                    if job.get("status") != "cancelled":
-                        processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
-                        job_service.mark_cancelled(job_id, processed_rows)
+                    # Already marked cancelling; ensure it's cancelled
+                    processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
+                    job_service.mark_cancelled(job_id, processed_rows)
                 else:
                     error_snippet = _tail_log(log_path, lines=20)
                     job_service.mark_failed(
@@ -237,17 +235,31 @@ def _run_engine(
 
 
 def cancel_job(job_id: str) -> bool:
-    """Request cancellation of a running job. Returns True if cancelled."""
+    """
+    Request cancellation of a running job.
+    Creates a .cancel flag file and terminates the subprocess.
+    Returns True if the job was successfully marked as cancelled.
+    """
     job = job_service.get_job(job_id)
     if not job:
         return False
 
-    # Only running jobs can be cancelled
+    # Only running or created jobs can be cancelled
     if job.get("status") not in ("running", "created"):
         return False
 
-    # Mark as cancelling
+    # Mark as cancelling in database
     job_service.mark_cancelling(job_id)
+
+    # Create the .cancel flag file so the engine can detect cancellation cooperatively
+    job_dir = config.JOBS_DIR / job_id
+    cancel_file = job_dir / ".cancel"
+    try:
+        cancel_file.touch()
+    except Exception as e:
+        # If we can't create the file, log but continue (subprocess termination will still occur)
+        import logging
+        logging.warning(f"Could not create .cancel file for job {job_id}: {e}")
 
     # Get the subprocess and terminate it
     with _process_lock:
@@ -257,14 +269,16 @@ def cancel_job(job_id: str) -> bool:
         try:
             # Send SIGTERM (works on Windows via terminate())
             proc.terminate()
-            # Give it a moment to clean up
+            # Wait up to 10 seconds for the process to exit cleanly
             try:
-                proc.wait(timeout=5)
+                proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
+                # Force kill if it doesn't respond
                 proc.kill()
                 proc.wait()
-        except Exception:
-            pass
+        except Exception as e:
+            import logging
+            logging.warning(f"Error terminating subprocess for job {job_id}: {e}")
 
     # Mark as cancelled (processed_rows will be updated by the engine or we'll count what exists)
     output_file = job.get("output_file")

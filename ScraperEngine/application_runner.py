@@ -1,5 +1,7 @@
 #!/usr/bin/env python
-""" application_runner.py — CLI entry point for the ScraperEngine. """
+"""
+application_runner.py — CLI entry point for the ScraperEngine.
+"""
 
 import argparse
 import json
@@ -34,17 +36,15 @@ def main():
 
     args = parser.parse_args()
 
-    # Log the headless setting
     print(f"[runner] Job ID: {args.job_id}", flush=True)
     print(f"[runner] Headless: {args.headless}", flush=True)
     print(f"[runner] Input: {args.input_csv}", flush=True)
     print(f"[runner] Output: {args.output_csv}", flush=True)
     print(f"[runner] Threads: {args.threads}", flush=True)
 
-    # Parse keywords
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else []
 
-    # Create a cancellation flag file
+    # Cancellation flag file
     cancel_file = Path(args.job_dir) / ".cancel"
     cancel_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -52,23 +52,16 @@ def main():
         return cancel_file.exists()
 
     try:
-        # Initialise the scraper
+        # Use Selenium Manager — no hardcoded chromedriver.exe
         scraper = AmazonScraper(
             listings=args.input_csv,
             max_threads=args.threads,
-            webdriver_file="chromedriver.exe",  # Assume in PATH or cwd
+            webdriver_file=None,          # Use Selenium Manager
+            workspace_dir=args.job_dir,
         )
 
-        # Override the scraper's extract_process to accept a cancellation callback
-        # We'll use a monkey-patch approach or pass via a custom method
-        # For simplicity, we'll use the existing extract_process and rely on
-        # the internal cancellation mechanism we'll add to ThreadWorker.
-
-        # Emit started event
-        emit("started", total=0)  # Will be updated by the engine
-
-        # Run the extraction and processing
-        result = scraper.extract_process(
+        # Run extraction + processing
+        scraper.extract_process(
             output=args.output_csv,
             price_symbol="$",
             base_append="https://www.amazon.com/",
@@ -76,20 +69,19 @@ def main():
             first_page_wait=args.first_page_wait,
             next_page_wait=args.next_page_wait,
             headless=args.headless,
-            cancel_check=is_cancelled,  # Pass cancellation check
+            cancel_check=is_cancelled,
         )
 
-        # Check if cancellation was requested
         if is_cancelled():
             emit("cancelled", processed=0, total=0)
             sys.exit(0)
 
-        # Count rows in output
+        # Count output rows
         try:
             import csv
             with open(args.output_csv, "r", encoding="utf-8") as f:
                 reader = csv.reader(f)
-                rows = sum(1 for _ in reader) - 1  # subtract header
+                rows = sum(1 for _ in reader) - 1
                 emit("completed", processed=rows, total=rows)
         except Exception:
             emit("completed", processed=0, total=0)

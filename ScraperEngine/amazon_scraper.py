@@ -221,39 +221,27 @@ class AmazonScraper:
         headless: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None
     ) -> str:
-        """
-        Extract product data from Amazon using multithreading.
-        
-        Args:
-            output_file: Path to save merged output CSV
-            first_page_wait: Wait time for first page load (seconds)
-            next_page_wait: Wait time for subsequent pages (seconds)
-            headless: Run browser in headless mode (default: False)
-            cancel_check: Optional callable that returns True if cancellation requested
-        
-        Returns:
-            Path to output file
-        """
         logger.info("=" * 60)
         logger.info("STARTING AMAZON PRODUCT EXTRACTION")
         logger.info("=" * 60)
-        
+
         # Load URLs
         urls = self._load_urls()
         total_urls = len(urls)
         logger.info(f"Loaded {total_urls} product URLs")
-        
+
         # Create thread folder
         self._create_thread_folder()
-        
+
         # Divide URLs
         url_chunks = self._divide_urls(urls)
         actual_threads = len(url_chunks)
         logger.info(f"Distributing URLs across {actual_threads} threads")
-        
+
         # Progress reporter
         progress_reporter = ProgressReporter(total=total_urls)
-        
+        progress_reporter.emit_started()   # <-- NEW: emit started with correct total
+
         # Create thread workers
         threads = []
         for i, chunk in enumerate(url_chunks, start=1):
@@ -270,31 +258,26 @@ class AmazonScraper:
                 progress_reporter=progress_reporter,
                 cancel_check=cancel_check,
             )
-            
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
             thread.start()
-        
-        # Wait for all threads to complete
+
         logger.info("Waiting for all threads to complete...")
         for thread in threads:
             thread.join()
-        
+
         logger.info("All threads completed")
-        
-        # Emit final progress (threads already emitted progress on each URL,
-        # but we ensure a final event is sent)
-        progress_reporter.emit_completed()
-        
+        progress_reporter.emit_completed()   # final event
+
         # Merge results
         self._merge_results(output_file)
-        
+
         logger.info("=" * 60)
         logger.info("EXTRACTION COMPLETED SUCCESSFULLY")
         logger.info("=" * 60)
-        
+
         return output_file
-    
+
     def process(
         self,
         input_file: str,

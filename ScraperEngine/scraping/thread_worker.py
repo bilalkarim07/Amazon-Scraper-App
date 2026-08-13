@@ -26,7 +26,7 @@ class ThreadWorker:
         next_page_wait=5,
         headless=False,
         progress_reporter: Optional[ProgressReporter] = None,
-        cancel_check: Optional[Callable] = None,
+        cancel_check: Optional[Callable[[], bool]] = None,
     ):
         self.thread_id = thread_id
         self.urls = urls
@@ -49,7 +49,7 @@ class ThreadWorker:
             self.human_simulator = HumanSimulator(self.driver)
         except Exception as e:
             logger.error(f"Thread {self.thread_id} failed to create driver: {e}")
-            raise
+            raise   # <-- propagate, do NOT return silently
 
     def _write_fallback_row(self, writer, url: str, error: str):
         try:
@@ -70,7 +70,8 @@ class ThreadWorker:
             self._create_driver()
         except Exception as e:
             logger.error(f"Thread {self.thread_id} cannot start without driver: {e}")
-            return
+            # Re-raise so the main thread can handle the failure
+            raise RuntimeError(f"Thread {self.thread_id} driver creation failed: {e}")
 
         logger.info(f"Thread {self.thread_id} started with {len(self.urls)} URLs")
 
@@ -84,9 +85,9 @@ class ThreadWorker:
                 total_urls = len(self.urls)
 
                 for idx, url in enumerate(self.urls, start=1):
-                    # Check cancellation
+                    # --- cancellation check before URL ---
                     if self.cancel_check and self.cancel_check():
-                        logger.info(f"Thread {self.thread_id} cancelled.")
+                        logger.info(f"Thread {self.thread_id} cancelled before URL {idx}.")
                         break
 
                     logger.info(f"Thread {self.thread_id} processing {idx}/{total_urls} links")
@@ -94,7 +95,13 @@ class ThreadWorker:
                     wait = self.first_page_wait if idx == 1 else self.next_page_wait
 
                     try:
-                        product_data = self.scrape_function(self.driver, url, wait)
+                        # pass cancel_check to extractor
+                        product_data = self.scrape_function(
+                            self.driver,
+                            url,
+                            wait,
+                            cancel_check=self.cancel_check
+                        )
 
                         if not isinstance(product_data, ProductData):
                             raise TypeError(
@@ -117,7 +124,7 @@ class ThreadWorker:
                         self._write_fallback_row(writer, url, str(e))
                         f.flush()
                     finally:
-                        # Increment progress after each URL (success or fallback)
+                        # progress increment after each URL (success or fallback)
                         if self.progress_reporter:
                             self.progress_reporter.increment()
 
@@ -125,11 +132,14 @@ class ThreadWorker:
 
         except Exception as e:
             logger.error(f"Thread {self.thread_id} fatal error: {e}")
+            # Propagate so the overall job fails
+            raise
 
         finally:
+            # --- ALWAYS close driver ---
             if self.driver:
                 try:
                     self.driver.quit()
                     logger.info(f"Thread {self.thread_id} driver closed")
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Thread {self.thread_id} error closing driver: {e}")

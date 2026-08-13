@@ -19,7 +19,6 @@ class ProgressReporter:
             self._total = total
 
     def increment(self, n: int = 1) -> int:
-        """Increment processed count by n. Returns new processed count."""
         with self._lock:
             self._processed += n
             self._emit_progress()
@@ -55,6 +54,16 @@ class ProgressReporter:
             "percentage": round(self.progress_percentage, 1),
         }
         print(json.dumps(data), flush=True)
+
+    def emit_started(self) -> None:
+        """Emit a started event with the correct total."""
+        with self._lock:
+            data = {
+                "event": "started",
+                "processed": 0,
+                "total": self._total,
+            }
+            print(json.dumps(data), flush=True)
 
     def emit_completed(self) -> None:
         data = {
