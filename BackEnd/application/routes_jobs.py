@@ -1,37 +1,19 @@
-"""
-routes_jobs.py — Job management endpoints.
-
-POST /api/jobs
-    Accept:  multipart/form-data
-      - file          : UploadFile  (the user's CSV)
-      - column        : str         (frontend column name, e.g. "Links")
-      - threads       : int         (1–5)
-      - first_page_wait : int       (seconds, e.g. 150)
-      - next_page_wait  : int       (seconds, e.g. 5)
-      - output_filename : str       (desired output file name, e.g. "result.csv")
-      - keywords      : str         (comma-separated, optional)
-      - headless      : bool        (default True)
-    Return:  { job_id, status }
-
-GET /api/jobs/{job_id}
-    Return:  JobStatusResponse
-"""
+""" routes_jobs.py — Job management endpoints. """
 
 from __future__ import annotations
-
 from typing import Annotated, Optional
-
+import csv
+import io
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File, status
-
 from application import job_service, scraper_service
-from application.models import JobCreateResponse, JobStatusResponse
-from application.config import DEFAULT_FIRST_PAGE_WAIT, DEFAULT_NEXT_PAGE_WAIT
+from application.models import JobCreateResponse, JobStatusResponse, CancelResponse
+from application.config import DEFAULT_FIRST_PAGE_WAIT, DEFAULT_NEXT_PAGE_WAIT, HEADLESS_MODE
 
 router = APIRouter()
 
 
 # ---------------------------------------------------------------------------
-# POST /api/jobs  — create and start a job
+# POST /api/jobs — create and start a job
 # ---------------------------------------------------------------------------
 
 @router.post(
@@ -49,9 +31,8 @@ async def create_job(
     next_page_wait: Annotated[int, Form(ge=1, description="Seconds to wait for subsequent pages")] = DEFAULT_NEXT_PAGE_WAIT,
     output_filename: Annotated[str, Form(description="Output CSV filename")] = "output.csv",
     keywords: Annotated[str, Form(description="Comma-separated keywords")] = "",
-    headless: Annotated[bool, Form(description="Run Chrome headless")] = True,
+    headless: Annotated[bool, Form(description="Run Chrome headless")] = HEADLESS_MODE,  # Now uses env var
 ) -> JobCreateResponse:
-
     # --- Validate file type ---
     if not (file.filename or "").lower().endswith(".csv"):
         raise HTTPException(
@@ -59,7 +40,6 @@ async def create_job(
             detail="Only .csv files are accepted.",
         )
 
-    # --- Read CSV bytes ---
     csv_bytes = await file.read()
     if not csv_bytes:
         raise HTTPException(
@@ -68,11 +48,8 @@ async def create_job(
         )
 
     # --- Validate CSV Column ---
-    import io
-    import csv
     try:
         text = csv_bytes.decode("utf-8-sig", errors="ignore")
-        # Get first line to parse headers
         first_line = text.splitlines()[0] if text.splitlines() else ""
         headers_reader = csv.reader(io.StringIO(first_line))
         headers = next(headers_reader, [])
@@ -80,10 +57,7 @@ async def create_job(
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail={
-                "error": "INVALID_CSV",
-                "message": f"Failed to parse CSV headers: {str(exc)}"
-            }
+            detail={"error": "INVALID_CSV", "message": f"Failed to parse CSV headers: {str(exc)}"},
         )
 
     matched_column = None
@@ -99,10 +73,10 @@ async def create_job(
                 "error": "INVALID_COLUMN",
                 "message": f"Column '{column}' does not exist in the uploaded CSV.",
                 "requested_column": column,
-                "available_columns": headers
-            }
+                "available_columns": headers,
+            },
         )
-    # Normalize column to the exact case found in the CSV
+
     column = matched_column
 
     # --- Validate / sanitise output filename ---
@@ -116,10 +90,10 @@ async def create_job(
     keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else []
 
     # --- Create the job record ---
-    job = job_service.create_job(total_rows=0)  # rows updated after CSV is parsed
+    job = job_service.create_job(total_rows=0)
     job_id = job["id"]
 
-    # --- Kick off the scraper in the background (non-blocking) ---
+    # --- Kick off the scraper in the background ---
     scraper_service.start_job(
         job_id=job_id,
         csv_bytes=csv_bytes,
@@ -136,7 +110,7 @@ async def create_job(
 
 
 # ---------------------------------------------------------------------------
-# GET /api/jobs/{job_id}  — query job status
+# GET /api/jobs/{job_id} — query job status
 # ---------------------------------------------------------------------------
 
 @router.get(
@@ -153,3 +127,38 @@ async def get_job(job_id: str) -> JobStatusResponse:
             detail=f"Job '{job_id}' not found.",
         )
     return JobStatusResponse(**job)
+
+
+# ---------------------------------------------------------------------------
+# POST /api/jobs/{job_id}/cancel — cancel a running job
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/api/jobs/{job_id}/cancel",
+    response_model=CancelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    tags=["Jobs"],
+    summary="Cancel a running scraping job",
+)
+async def cancel_job(job_id: str) -> CancelResponse:
+    job = job_service.get_job(job_id)
+    if not job:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Job '{job_id}' not found.",
+        )
+
+    if job.get("status") not in ("running", "created"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Cannot cancel job with status '{job.get('status')}'. Only running or created jobs can be cancelled.",
+        )
+
+    success = scraper_service.cancel_job(job_id)
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel job.",
+        )
+
+    return CancelResponse(job_id=job_id, status="cancelling")

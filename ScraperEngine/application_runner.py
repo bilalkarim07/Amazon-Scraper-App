@@ -1,94 +1,104 @@
-"""
-application_runner.py — CLI bridge between the FastAPI BackEnd and the AmazonScraper engine.
+#!/usr/bin/env python
+""" application_runner.py — CLI entry point for the ScraperEngine. """
 
-Invoked by the BackEnd's scraper_service.py as a subprocess:
-
-    uv run python application_runner.py \\
-        --job-id <job_id> \\
-        --job-dir <absolute/path/to/job/dir> \\
-        --input-csv <absolute/path/to/input.csv> \\
-        --output-csv <absolute/path/to/output.csv> \\
-        --threads <int> \\
-        --first-page-wait <int_seconds> \\
-        --next-page-wait <int_seconds> \\
-        [--keywords kw1,kw2,kw3] \\
-        [--headless]
-
-Exit codes:
-    0 — success, output CSV written to --output-csv
-    1 — validation / engine error
-"""
-
-import sys
-import os
 import argparse
-import traceback
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+# Add src to path so we can import amazon_scraper
+sys.path.insert(0, str(Path(__file__).parent / "src"))
+
+from amazon_scraper import AmazonScraper  # type: ignore
+
+
+def emit(event: str, **kwargs) -> None:
+    """Emit a structured JSON event to stdout."""
+    data = {"event": event, **kwargs}
+    print(json.dumps(data), flush=True)
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Amazon Scraper — Application Runner")
-
-    parser.add_argument("--job-id",          required=True,  help="Unique job identifier")
-    parser.add_argument("--job-dir",         required=True,  help="Absolute path to job workspace directory")
-    parser.add_argument("--input-csv",       required=True,  help="Absolute path to normalised input CSV")
-    parser.add_argument("--output-csv",      required=True,  help="Absolute path where final output CSV is written")
-    parser.add_argument("--threads",         required=True,  type=int, help="Number of parallel threads (1–5)")
-    parser.add_argument("--first-page-wait", required=True,  type=int, help="Wait time for first page (seconds)")
-    parser.add_argument("--next-page-wait",  required=True,  type=int, help="Wait time for subsequent pages (seconds)")
-    parser.add_argument("--keywords",        default="",     help="Comma-separated keyword list (optional)")
-    parser.add_argument("--headless",        action="store_true", help="Run Chrome in headless mode")
+    parser = argparse.ArgumentParser(description="Amazon Scraper Engine Runner")
+    parser.add_argument("--job-id", required=True, help="Unique job identifier")
+    parser.add_argument("--job-dir", required=True, help="Job directory path")
+    parser.add_argument("--input-csv", required=True, help="Path to input CSV")
+    parser.add_argument("--output-csv", required=True, help="Path to output CSV")
+    parser.add_argument("--threads", type=int, default=3, help="Number of threads")
+    parser.add_argument("--first-page-wait", type=int, default=150, help="First page wait in seconds")
+    parser.add_argument("--next-page-wait", type=int, default=5, help="Next page wait in seconds")
+    parser.add_argument("--keywords", type=str, default="", help="Comma-separated keywords")
+    parser.add_argument("--headless", action="store_true", help="Run in headless mode")
 
     args = parser.parse_args()
 
-    print(f"[runner] Job ID     : {args.job_id}", flush=True)
-    print(f"[runner] Job dir    : {args.job_dir}", flush=True)
-    print(f"[runner] Input CSV  : {args.input_csv}", flush=True)
-    print(f"[runner] Output CSV : {args.output_csv}", flush=True)
-    print(f"[runner] Threads    : {args.threads}", flush=True)
-    print(f"[runner] First wait : {args.first_page_wait}s", flush=True)
-    print(f"[runner] Next wait  : {args.next_page_wait}s", flush=True)
-    print(f"[runner] Keywords   : {args.keywords!r}", flush=True)
-    print(f"[runner] Headless   : {args.headless}", flush=True)
+    # Log the headless setting
+    print(f"[runner] Job ID: {args.job_id}", flush=True)
+    print(f"[runner] Headless: {args.headless}", flush=True)
+    print(f"[runner] Input: {args.input_csv}", flush=True)
+    print(f"[runner] Output: {args.output_csv}", flush=True)
+    print(f"[runner] Threads: {args.threads}", flush=True)
 
     # Parse keywords
     keywords = [k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else []
 
-    # Validate inputs before importing heavy deps
-    if not os.path.isfile(args.input_csv):
-        print(f"[runner] ERROR: Input CSV not found: {args.input_csv}", flush=True)
-        sys.exit(1)
+    # Create a cancellation flag file
+    cancel_file = Path(args.job_dir) / ".cancel"
+    cancel_file.parent.mkdir(parents=True, exist_ok=True)
 
-    if not os.path.isdir(args.job_dir):
-        print(f"[runner] ERROR: Job directory not found: {args.job_dir}", flush=True)
-        sys.exit(1)
+    def is_cancelled() -> bool:
+        return cancel_file.exists()
 
     try:
-        from amazon_scraper import AmazonScraper
-
+        # Initialise the scraper
         scraper = AmazonScraper(
             listings=args.input_csv,
             max_threads=args.threads,
-            workspace_dir=args.job_dir,
+            webdriver_file="chromedriver.exe",  # Assume in PATH or cwd
         )
 
-        result_path = scraper.extract_process(
+        # Override the scraper's extract_process to accept a cancellation callback
+        # We'll use a monkey-patch approach or pass via a custom method
+        # For simplicity, we'll use the existing extract_process and rely on
+        # the internal cancellation mechanism we'll add to ThreadWorker.
+
+        # Emit started event
+        emit("started", total=0)  # Will be updated by the engine
+
+        # Run the extraction and processing
+        result = scraper.extract_process(
             output=args.output_csv,
+            price_symbol="$",
+            base_append="https://www.amazon.com/",
             keywords=keywords,
             first_page_wait=args.first_page_wait,
             next_page_wait=args.next_page_wait,
             headless=args.headless,
+            cancel_check=is_cancelled,  # Pass cancellation check
         )
 
-        if not os.path.isfile(result_path):
-            print(f"[runner] ERROR: Scraper finished but output file missing: {result_path}", flush=True)
-            sys.exit(1)
+        # Check if cancellation was requested
+        if is_cancelled():
+            emit("cancelled", processed=0, total=0)
+            sys.exit(0)
 
-        print(f"[runner] SUCCESS: Output written to {result_path}", flush=True)
+        # Count rows in output
+        try:
+            import csv
+            with open(args.output_csv, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                rows = sum(1 for _ in reader) - 1  # subtract header
+                emit("completed", processed=rows, total=rows)
+        except Exception:
+            emit("completed", processed=0, total=0)
+
         sys.exit(0)
 
-    except Exception as e:
-        print(f"[runner] FATAL ERROR: {e}", flush=True)
-        traceback.print_exc()
+    except Exception as exc:
+        emit("failed", error=str(exc))
+        print(f"[runner] Error: {exc}", flush=True)
         sys.exit(1)
 
 

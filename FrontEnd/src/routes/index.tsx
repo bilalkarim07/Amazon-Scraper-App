@@ -37,14 +37,12 @@ type Errors = Partial<
   >
 >;
 
-// Helper to generate default output name
 const defaultOutputName = (sourceName: string) =>
   `${sourceName.replace(/\.csv$/i, "")}_scraped.csv`;
 
 function ScrapeNew() {
   const { files, job, backendOnline, startJob, cancelJob } = useScrape();
 
-  // File state — store both display info AND the raw File object for FormData
   const [fileInfo, setFileInfo] = useState<{ name: string; rows: number; raw: File } | null>(null);
 
   const [column, setColumn] = useState("Links");
@@ -60,8 +58,9 @@ function ScrapeNew() {
   const [nextPageWait, setNextPageWait] = useState("10");
   const [keywords, setKeywords] = useState("UPC,ASIN,Model Product Information");
 
-  const processing = job.status === "processing";
+  const processing = job.status === "processing" || job.status === "cancelling";
   const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
+  const isCancelling = job.status === "cancelling";
 
   // ---- Output name auto-generation and uniqueness ----
   const getUniqueOutputName = (baseName: string): string => {
@@ -204,6 +203,10 @@ function ScrapeNew() {
         toast.error(err instanceof Error ? err.message : "Failed to start scraping job");
       }
     }
+  };
+
+  const handleCancel = async () => {
+    await cancelJob();
   };
 
   const threadDots = useMemo(() => [1, 2, 3, 4], []);
@@ -461,7 +464,8 @@ function ScrapeNew() {
             <div className="space-y-3">
               <div className="flex items-center justify-between font-display text-lg">
                 <span className="flex items-center gap-2 text-accent-foreground">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Processing
+                  <Loader2 className={`h-4 w-4 ${!isCancelling ? "animate-spin" : ""}`} />
+                  {isCancelling ? "Cancelling..." : "Processing"}
                 </span>
                 <span className="font-mono text-sm text-muted-foreground">
                   {job.done}/{job.total}
@@ -473,18 +477,19 @@ function ScrapeNew() {
                   style={{ width: `${pct}%` }}
                 />
               </div>
-              <p className="text-xs text-muted-foreground">
-                Polling for updates every 3 seconds…
-              </p>
-              <button
-                onClick={() => {
-                  cancelJob();
-                  toast("Job monitoring stopped. The scraper may still be running.");
-                }}
-                className="rounded-lg border-2 bg-card px-4 py-2 text-xs font-semibold press"
-              >
-                Stop Watching
-              </button>
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-muted-foreground">
+                  {pct}% complete
+                </span>
+                {!isCancelling && (
+                  <button
+                    onClick={handleCancel}
+                    className="rounded-lg border-2 bg-destructive px-4 py-2 text-xs font-semibold text-destructive-foreground press"
+                  >
+                    Cancel Scraping
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -495,7 +500,18 @@ function ScrapeNew() {
                 {job.sourceName}
               </span>
               <button
-                onClick={cancelJob}
+                onClick={() => {
+                  // Reset job state to idle
+                  setJob({
+                    status: "idle",
+                    jobId: null,
+                    done: 0,
+                    total: 0,
+                    sourceName: "",
+                    outputFile: null,
+                    error: null,
+                  });
+                }}
                 className="rounded-lg border-2 bg-primary px-4 py-2 text-xs font-semibold press"
               >
                 Scrape another
@@ -513,7 +529,17 @@ function ScrapeNew() {
                 )}
               </div>
               <button
-                onClick={cancelJob}
+                onClick={() => {
+                  setJob({
+                    status: "idle",
+                    jobId: null,
+                    done: 0,
+                    total: 0,
+                    sourceName: "",
+                    outputFile: null,
+                    error: null,
+                  });
+                }}
                 className="rounded-lg border-2 bg-primary px-4 py-2 text-xs font-semibold press"
               >
                 Try again

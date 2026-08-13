@@ -33,10 +33,11 @@ Usage:
 import os
 import threading
 import pandas as pd
-from typing import List, Union
+from typing import List, Union, Optional, Callable
 
 from scraping.thread_worker import ThreadWorker
 from utils.logger import logger
+from scraping.progress_reporter import ProgressReporter
 
 
 class AmazonScraper:
@@ -217,7 +218,8 @@ class AmazonScraper:
         output_file: str = 'output.csv',
         first_page_wait: int = 150,
         next_page_wait: int = 5,
-        headless: bool = False
+        headless: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None
     ) -> str:
         """
         Extract product data from Amazon using multithreading.
@@ -227,6 +229,7 @@ class AmazonScraper:
             first_page_wait: Wait time for first page load (seconds)
             next_page_wait: Wait time for subsequent pages (seconds)
             headless: Run browser in headless mode (default: False)
+            cancel_check: Optional callable that returns True if cancellation requested
         
         Returns:
             Path to output file
@@ -237,7 +240,8 @@ class AmazonScraper:
         
         # Load URLs
         urls = self._load_urls()
-        logger.info(f"Loaded {len(urls)} product URLs")
+        total_urls = len(urls)
+        logger.info(f"Loaded {total_urls} product URLs")
         
         # Create thread folder
         self._create_thread_folder()
@@ -246,6 +250,9 @@ class AmazonScraper:
         url_chunks = self._divide_urls(urls)
         actual_threads = len(url_chunks)
         logger.info(f"Distributing URLs across {actual_threads} threads")
+        
+        # Progress reporter
+        progress_reporter = ProgressReporter(total=total_urls)
         
         # Create thread workers
         threads = []
@@ -259,7 +266,9 @@ class AmazonScraper:
                 scrape_function=self.scrape_function,
                 first_page_wait=first_page_wait,
                 next_page_wait=next_page_wait,
-                headless=headless
+                headless=headless,
+                progress_reporter=progress_reporter,
+                cancel_check=cancel_check,
             )
             
             thread = threading.Thread(target=worker.run)
@@ -272,6 +281,10 @@ class AmazonScraper:
             thread.join()
         
         logger.info("All threads completed")
+        
+        # Emit final progress (threads already emitted progress on each URL,
+        # but we ensure a final event is sent)
+        progress_reporter.emit_completed()
         
         # Merge results
         self._merge_results(output_file)
@@ -333,7 +346,8 @@ class AmazonScraper:
         keywords: List[str] = None,
         first_page_wait: int = 150,
         next_page_wait: int = 5,
-        headless: bool = False
+        headless: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None
     ) -> str:
         """
         Combined workflow: extract then process.
@@ -346,6 +360,7 @@ class AmazonScraper:
             first_page_wait: Wait time for first page load (seconds)
             next_page_wait: Wait time for subsequent pages (seconds)
             headless: Run browser in headless mode (default: False)
+            cancel_check: Optional callable that returns True if cancellation requested
         
         Returns:
             Path to final processed output file
@@ -360,7 +375,8 @@ class AmazonScraper:
             output_file=temp_extract_file,
             first_page_wait=first_page_wait,
             next_page_wait=next_page_wait,
-            headless=headless
+            headless=headless,
+            cancel_check=cancel_check,
         )
         
         # Process

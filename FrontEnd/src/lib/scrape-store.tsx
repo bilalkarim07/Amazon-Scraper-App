@@ -31,7 +31,7 @@ export type ScrapedFile = {
 
 /** The full job lifecycle tracked in the frontend. */
 export type JobState = {
-  status: "idle" | "processing" | "done" | "failed";
+  status: "idle" | "processing" | "cancelling" | "done" | "failed";
   jobId: string | null;
   done: number;           // processed_rows
   total: number;          // total_rows
@@ -55,7 +55,7 @@ type Ctx = {
     nextPageWait?: number | undefined;
     keywords?: string[] | undefined;
   }) => Promise<void>;
-  cancelJob: () => void;
+  cancelJob: () => Promise<void>;
   deleteFile: (id: string) => void;
 };
 
@@ -84,7 +84,10 @@ function buildFormData(opts: {
   fd.append("next_page_wait", String(opts.nextPageWait));
   fd.append("output_filename", opts.outputName);
   fd.append("keywords", opts.keywords.join(","));
-  fd.append("headless", "true");
+  // For development, we want headless=false; but we'll let the backend decide via env.
+  // We'll omit headless parameter so backend uses its default (HEADLESS_MODE).
+  // If you want to force it from frontend, you can uncomment and set false.
+  // fd.append("headless", "false");
   return fd;
 }
 
@@ -134,7 +137,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       }
     };
     check();
-    // Re-check every 10 seconds
     const id = setInterval(check, 10_000);
     return () => { mounted = false; clearInterval(id); };
   }, []);
@@ -182,8 +184,33 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               status: "failed",
               error: data.error ?? "Scraping failed.",
             }));
+          } else if (data.status === "cancelled") {
+            stopPolling();
+            setJob((prev) => ({
+              ...prev,
+              status: "idle",
+              jobId: null,
+              done: 0,
+              total: 0,
+              sourceName: "",
+              outputFile: null,
+              error: null,
+            }));
+            // Optionally add to files if partial output exists
+            if (data.output_file) {
+              const newFile: ScrapedFile = {
+                id: jobId,
+                name: data.output_file.split(/[\\/]/).pop() ?? "output.csv",
+                createdAt: Date.now(),
+                rows: data.processed_rows ?? 0,
+              };
+              setFiles((f) => [newFile, ...f]);
+            }
+          } else if (data.status === "cancelling") {
+            // Still running, but marked for cancellation
+            setJob((prev) => ({ ...prev, status: "cancelling" }));
           } else {
-            // still running — update progress counters
+            // still running or created — update progress counters
             setJob((prev) => ({
               ...prev,
               done: data.processed_rows ?? prev.done,
@@ -263,19 +290,40 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     [stopPolling, pollJobStatus],
   );
 
-  // ---- cancelJob — resets to idle (no server-side cancel yet in Phase 1) ----
-  const cancelJob = useCallback(() => {
-    stopPolling();
-    setJob({
-      status: "idle",
-      jobId: null,
-      done: 0,
-      total: 0,
-      sourceName: "",
-      outputFile: null,
-      error: null,
-    });
-  }, [stopPolling]);
+  // ---- cancelJob — calls backend cancel endpoint ----
+  const cancelJob = useCallback(async () => {
+    if (!job.jobId) {
+      // If no jobId, just reset local state
+      stopPolling();
+      setJob({
+        status: "idle",
+        jobId: null,
+        done: 0,
+        total: 0,
+        sourceName: "",
+        outputFile: null,
+        error: null,
+      });
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/jobs/${job.jobId}/cancel`, {
+        method: "POST",
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.detail || "Failed to cancel job");
+      }
+      // The backend will mark job as cancelling and then cancelled.
+      // We'll update state based on polling.
+      setJob((prev) => ({ ...prev, status: "cancelling" }));
+      toast.info("Cancelling job...");
+    } catch (error) {
+      console.error("Cancel error:", error);
+      toast.error(error instanceof Error ? error.message : "Failed to cancel");
+    }
+  }, [job.jobId, stopPolling]);
 
   const deleteFile = useCallback((id: string) => {
     setFiles((f) => f.filter((x) => x.id !== id));

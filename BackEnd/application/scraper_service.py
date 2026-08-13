@@ -1,31 +1,21 @@
-"""
-scraper_service.py — Orchestrates the full lifecycle of a scraping job.
-
-Responsibilities:
-1. Create the job workspace on disk.
-2. Normalise the uploaded CSV (rename the frontend column → 'Product Link').
-3. Save the normalised input.csv.
-4. Launch ScraperEngine/application_runner.py as a subprocess (non-blocking).
-5. Monitor the subprocess in a background thread.
-6. Update job status via job_service.
-
-The FastAPI route should never touch AmazonScraper directly — all engine
-communication goes through this module.
-"""
+""" scraper_service.py — Orchestrates the full lifecycle of a scraping job. """
 
 from __future__ import annotations
-
 import csv
 import io
+import json
 import os
 import subprocess
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
-
+from typing import Optional, Dict, Any
 from application import config
 from application import job_service
+
+# --- Global registry of running subprocesses ---
+_running_processes: Dict[str, subprocess.Popen] = {}
+_process_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -43,12 +33,7 @@ def start_job(
     keywords: Optional[list[str]] = None,
     headless: bool = True,
 ) -> None:
-    """
-    Prepare the job workspace and launch the scraper in a background thread.
-
-    This function returns immediately — the caller (FastAPI route) should NOT
-    await it.  The background thread updates job status when it finishes.
-    """
+    """Prepare the job workspace and launch the scraper in a background thread."""
     job_dir = config.JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
@@ -63,7 +48,6 @@ def start_job(
         job_service.mark_failed(job_id, str(exc))
         return
 
-    # Update total_rows now that we know it
     job_service.update_job(job_id, total_rows=total_rows)
 
     # --- 2. Determine output path ---
@@ -83,7 +67,7 @@ def start_job(
             keywords or [],
             headless,
         ),
-        daemon=True,   # Die with the main process if it exits
+        daemon=True,
         name=f"scraper-{job_id[:8]}",
     )
     bg.start()
@@ -98,14 +82,7 @@ def _save_normalised_csv(
     column_name: str,
     job_dir: Path,
 ) -> tuple[int, Path]:
-    """
-    Read the uploaded CSV, validate that `column_name` exists, rename it to
-    'Product Link', and write input.csv into the job directory.
-
-    Returns (total_rows, path_to_input_csv).
-    Raises ValueError with a human-readable message on validation failure.
-    """
-    text = csv_bytes.decode("utf-8-sig")   # strip BOM if present
+    text = csv_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
 
     if reader.fieldnames is None or column_name not in reader.fieldnames:
@@ -115,23 +92,19 @@ def _save_normalised_csv(
             f"Available columns: {available}"
         )
 
-    # Rename the column and collect all rows
     rows = []
     for row in reader:
-        # Rename frontend column → engine contract
         row["Product Link"] = row.pop(column_name)
         rows.append(row)
 
     if not rows:
         raise ValueError("Uploaded CSV contains no data rows.")
 
-    # Build new fieldnames with 'Product Link' in place of the original column
     new_fieldnames = [
         "Product Link" if f == column_name else f
         for f in reader.fieldnames
     ]
 
-    # Write normalised CSV
     input_csv_path = job_dir / "input.csv"
     with open(input_csv_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=new_fieldnames, extrasaction="ignore")
@@ -152,10 +125,7 @@ def _run_engine(
     keywords: list[str],
     headless: bool,
 ) -> None:
-    """
-    Run the ScraperEngine subprocess and update job status when it finishes.
-    Executed inside a daemon background thread.
-    """
+    """Run the ScraperEngine subprocess and update job status."""
     job_service.mark_running(job_id)
 
     cmd = [
@@ -163,18 +133,16 @@ def _run_engine(
         "run",
         "python",
         str(config.ENGINE_RUNNER),
-        "--job-id",          job_id,
-        "--job-dir",         str(job_dir),
-        "--input-csv",       str(input_csv_path),
-        "--output-csv",      str(output_csv_path),
-        "--threads",         str(threads),
+        "--job-id", job_id,
+        "--job-dir", str(job_dir),
+        "--input-csv", str(input_csv_path),
+        "--output-csv", str(output_csv_path),
+        "--threads", str(threads),
         "--first-page-wait", str(first_page_wait),
-        "--next-page-wait",  str(next_page_wait),
+        "--next-page-wait", str(next_page_wait),
     ]
-
     if keywords:
         cmd += ["--keywords", ",".join(keywords)]
-
     if headless:
         cmd.append("--headless")
 
@@ -184,35 +152,131 @@ def _run_engine(
         with open(log_path, "w", encoding="utf-8") as log_fh:
             proc = subprocess.Popen(
                 cmd,
-                cwd=str(config.ENGINE_ROOT),   # engine's working directory
-                stdout=log_fh,
+                cwd=str(config.ENGINE_ROOT),
+                stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
+                bufsize=1,
             )
-            proc.wait()
 
-        if proc.returncode == 0 and output_csv_path.is_file():
-            # Count output rows for the status response
-            processed_rows = _count_csv_rows(output_csv_path)
-            job_service.mark_completed(
-                job_id,
-                output_file=str(output_csv_path),
-                processed_rows=processed_rows,
-            )
-        else:
-            # Grab last few lines from log for the error field
-            error_snippet = _tail_log(log_path, lines=20)
-            job_service.mark_failed(
-                job_id,
-                error=f"Runner exited with code {proc.returncode}.\n{error_snippet}",
-            )
+            # Register process for cancellation
+            with _process_lock:
+                _running_processes[job_id] = proc
+
+            # Read stdout line by line — parse JSON progress events
+            try:
+                for line in iter(proc.stdout.readline, ""):
+                    if not line:
+                        break
+                    # Always write to runner.log
+                    log_fh.write(line)
+                    log_fh.flush()
+
+                    # Try to parse as JSON progress event
+                    line_stripped = line.strip()
+                    if line_stripped.startswith("{") and line_stripped.endswith("}"):
+                        try:
+                            event = json.loads(line_stripped)
+                            if event.get("event") == "progress":
+                                processed = event.get("processed", 0)
+                                total = event.get("total", 0)
+                                job_service.update_progress(job_id, processed)
+                                # Also update total_rows if not set
+                                if total > 0:
+                                    current = job_service.get_job(job_id)
+                                    if current and current.get("total_rows", 0) == 0:
+                                        job_service.update_job(job_id, total_rows=total)
+                            elif event.get("event") == "completed":
+                                processed = event.get("processed", 0)
+                                # Final progress update
+                                job_service.update_progress(job_id, processed)
+                            elif event.get("event") == "failed":
+                                error_msg = event.get("error", "Unknown engine error")
+                                job_service.mark_failed(job_id, error_msg)
+                        except json.JSONDecodeError:
+                            pass  # Not a JSON line, continue
+
+            finally:
+                proc.stdout.close()
+
+            # Wait for process to exit
+            return_code = proc.wait()
+
+            # Unregister process
+            with _process_lock:
+                _running_processes.pop(job_id, None)
+
+            # Final status update based on return code
+            if return_code == 0 and output_csv_path.is_file():
+                processed_rows = _count_csv_rows(output_csv_path)
+                job_service.mark_completed(
+                    job_id,
+                    output_file=str(output_csv_path),
+                    processed_rows=processed_rows,
+                )
+            else:
+                # Check if job was cancelled
+                job = job_service.get_job(job_id)
+                if job and job.get("status") == "cancelling":
+                    # Already marked cancelling; we'll mark cancelled via the cancel endpoint
+                    # But if the process exited due to cancellation, ensure it's cancelled
+                    if job.get("status") != "cancelled":
+                        processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
+                        job_service.mark_cancelled(job_id, processed_rows)
+                else:
+                    error_snippet = _tail_log(log_path, lines=20)
+                    job_service.mark_failed(
+                        job_id,
+                        error=f"Runner exited with code {return_code}.\n{error_snippet}",
+                    )
 
     except Exception as exc:
-        job_service.mark_failed(job_id, error=str(exc))
+        with _process_lock:
+            _running_processes.pop(job_id, None)
+        job_service.mark_failed(job_id, str(exc))
+
+
+def cancel_job(job_id: str) -> bool:
+    """Request cancellation of a running job. Returns True if cancelled."""
+    job = job_service.get_job(job_id)
+    if not job:
+        return False
+
+    # Only running jobs can be cancelled
+    if job.get("status") not in ("running", "created"):
+        return False
+
+    # Mark as cancelling
+    job_service.mark_cancelling(job_id)
+
+    # Get the subprocess and terminate it
+    with _process_lock:
+        proc = _running_processes.get(job_id)
+
+    if proc:
+        try:
+            # Send SIGTERM (works on Windows via terminate())
+            proc.terminate()
+            # Give it a moment to clean up
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+        except Exception:
+            pass
+
+    # Mark as cancelled (processed_rows will be updated by the engine or we'll count what exists)
+    output_file = job.get("output_file")
+    processed_rows = 0
+    if output_file and Path(output_file).is_file():
+        processed_rows = _count_csv_rows(Path(output_file))
+
+    job_service.mark_cancelled(job_id, processed_rows)
+    return True
 
 
 def _count_csv_rows(path: Path) -> int:
-    """Count data rows (excluding header) in a CSV file."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
             reader = csv.reader(fh)
@@ -223,10 +287,9 @@ def _count_csv_rows(path: Path) -> int:
 
 
 def _tail_log(path: Path, lines: int = 20) -> str:
-    """Return the last N lines from a text file."""
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
             all_lines = fh.readlines()
-        return "".join(all_lines[-lines:])
+            return "".join(all_lines[-lines:])
     except Exception:
         return ""

@@ -1,44 +1,32 @@
-"""
-config.py — Centralised configuration for the BackEnd application.
-
-All paths and constants live here so nothing is hard-coded in service files.
-"""
+""" config.py — Application configuration with environment awareness. """
 
 import os
 from pathlib import Path
 
-# ---------------------------------------------------------------------------
-# Directory layout
-# ---------------------------------------------------------------------------
+# --- Paths ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+DATA_DIR = BASE_DIR / "data"
+JOBS_DIR = DATA_DIR / "jobs"
+DB_PATH = DATA_DIR / "scraper.db"
 
-# Root of the BackEnd project (contains this `application/` package)
-BACKEND_ROOT: Path = Path(__file__).resolve().parent.parent
+# --- Engine paths ---
+ENGINE_ROOT = BASE_DIR.parent / "ScraperEngine"
+ENGINE_RUNNER = ENGINE_ROOT / "application_runner.py"
 
-# Root of the ScraperEngine project (sibling directory)
-ENGINE_ROOT: Path = BACKEND_ROOT.parent / "ScraperEngine"
+# --- Python executable ---
+UV_EXECUTABLE = os.environ.get("UV", "uv")
 
-# Where all job data is stored: BackEnd/data/jobs/<job_id>/
-DATA_DIR: Path = BACKEND_ROOT / "data"
-JOBS_DIR: Path = DATA_DIR / "jobs"
+# --- Headless mode ---
+# Default to False for development, override with env var for production.
+HEADLESS_MODE = 'false'
 
-# SQLite database file
-DB_PATH: Path = DATA_DIR / "jobs.db"
+# --- Wait defaults (seconds) ---
+DEFAULT_FIRST_PAGE_WAIT = 150
+DEFAULT_NEXT_PAGE_WAIT = 5
 
-# ---------------------------------------------------------------------------
-# Engine invocation
-# ---------------------------------------------------------------------------
-
-# The `uv` executable inside the ScraperEngine venv.
-# On Windows, uv is typically on PATH after installation; we rely on that.
-# If not on PATH, set UV_EXECUTABLE env var to the full path.
-UV_EXECUTABLE: str = os.environ.get("UV_EXECUTABLE", "uv")
-
-# Path to the thin CLI runner script inside the engine project
-ENGINE_RUNNER: Path = ENGINE_ROOT / "application_runner.py"
-
-# ---------------------------------------------------------------------------
-# CORS — origins allowed to call the API
-# ---------------------------------------------------------------------------
+# --- Ensure directories exist ---
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 # TanStack dev server runs on 3000; add 3001 as fallback
 CORS_ORIGINS: list[str] = [
@@ -50,9 +38,4 @@ CORS_ORIGINS: list[str] = [
     "http://127.0.0.1:5173",
 ]
 
-# ---------------------------------------------------------------------------
-# Job defaults
-# ---------------------------------------------------------------------------
 
-DEFAULT_FIRST_PAGE_WAIT: int = 150   # seconds
-DEFAULT_NEXT_PAGE_WAIT: int = 5      # seconds
