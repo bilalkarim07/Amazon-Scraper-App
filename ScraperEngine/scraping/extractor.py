@@ -15,7 +15,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, WebDriverException
+from selenium.common.exceptions import TimeoutException, WebDriverException, NoSuchElementException
 import json
 from models import ProductData
 from utils.logger import logger
@@ -275,6 +275,7 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
 
     # Set page load timeout to prevent indefinite blocking
     driver.set_page_load_timeout(60)  # 60 seconds max for page load
+    driver.set_script_timeout(10)     # 10 seconds max for JavaScript execution
 
     # --- Navigation ---
     logger.info("[worker] Calling driver.get()")
@@ -311,56 +312,101 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
 
     # --- Page extraction ---
     logger.info("[worker] Starting page extraction")
+
+    # Read page source with a timeout (using JavaScript to get HTML if needed)
+    logger.info("[worker] extraction: reading page_source - START")
     try:
-        soup = BeautifulSoup(driver.page_source, "lxml")
+        # Set a short timeout for page_source retrieval
+        source = driver.page_source
+        logger.info("[worker] extraction: reading page_source - DONE")
+    except Exception as e:
+        logger.error(f"[worker] Failed to get page source: {e}")
+        raise RuntimeError(f"Could not get page source: {e}")
+
+    try:
+        soup = BeautifulSoup(source, "lxml")
+        logger.info("[worker] extraction: BeautifulSoup parsing - DONE")
     except Exception as e:
         logger.error(f"[worker] Failed to parse page HTML: {e}")
-        raise RuntimeError(f"Could not parse page HTML: {e}") from e
+        raise RuntimeError(f"Could not parse page HTML: {e}")
 
     # Initialize with all defaults
     data = {
         'Product Link': url,
         'ASIN': extract_asin(url),
     }
-    
-    # Title
-    data['Title'] = safe_text(soup.find("span", id="productTitle"))
-    
-    # Store information
+
+    # --- Title ---
+    logger.info("[worker] extraction: locating title - START")
+    title_tag = soup.find("span", id="productTitle")
+    data['Title'] = safe_text(title_tag)
+    logger.info("[worker] extraction: locating title - DONE")
+
+    # --- Store information ---
+    logger.info("[worker] extraction: locating store - START")
     store = soup.find("a", id="bylineInfo")
     data['Store Name'] = safe_text(store)
     href = safe_attr(store, "href")
     data['Store Link'] = href if href != "Not Mentioned" else "Not Mentioned"
-    
-    # Ratings
+    logger.info("[worker] extraction: locating store - DONE")
+
+    # --- Ratings ---
+    logger.info("[worker] extraction: locating ratings - START")
     rating = soup.find("span", id="acrPopover")
     if rating:
         data['Ratings'] = rating.get("title") or safe_text(rating.find("a"))
     else:
         data['Ratings'] = "Not Mentioned"
-    
-    # Reviews
+    logger.info("[worker] extraction: locating ratings - DONE")
+
+    # --- Reviews ---
+    logger.info("[worker] extraction: locating reviews - START")
     reviews = soup.find("span", id="acrCustomerReviewText")
     data['Reviews'] = safe_attr(reviews, "aria-label")
-    
-    # Price
+    logger.info("[worker] extraction: locating reviews - DONE")
+
+    # --- Price ---
+    logger.info("[worker] extraction: locating price - START")
     price = soup.find("div", id="corePriceDisplay_desktop_feature_div")
     data['Price Box'] = safe_text(price)
-    
-    # Description (Top Highlights)
+    logger.info("[worker] extraction: locating price - DONE")
+
+    # --- Description ---
+    logger.info("[worker] extraction: locating description - START")
     bullets = soup.find("div", id="feature-bullets")
     data['Description'] = safe_text(bullets.find("ul")) if bullets else "Not Mentioned"
-    
-    # Top Highlights from poExpander
+    logger.info("[worker] extraction: locating description - DONE")
+
+    # --- Top Highlights from poExpander (requires JavaScript click) ---
+    logger.info("[worker] extraction: top highlights - START")
     item_pairs = []
     try:
-        toggle = soup.find("div", id="poToggleButton")
-        if toggle:
+        # Locate the toggle button with a timeout
+        logger.info("[worker] extraction: looking for poToggleButton - START")
+        try:
+            toggle_div = driver.find_element(By.ID, "poToggleButton")
+            toggle_anchor = toggle_div.find_element(By.TAG_NAME, "a") if toggle_div else None
+        except NoSuchElementException:
+            toggle_div = None
+            toggle_anchor = None
+        logger.info("[worker] extraction: looking for poToggleButton - DONE")
+
+        if toggle_anchor:
+            logger.info("[worker] extraction: attempting to click toggle - START")
             try:
-                driver.execute_script("arguments[0].click();", toggle.find("a"))
-                time.sleep(1)
-            except:
-                pass
+                # Wait for the toggle to be clickable
+                wait = WebDriverWait(driver, 10)
+                clickable_toggle = wait.until(EC.element_to_be_clickable(toggle_anchor))
+                driver.execute_script("arguments[0].click();", clickable_toggle)
+                logger.info("[worker] extraction: toggle clicked successfully")
+                time.sleep(1)  # Brief pause for content to load
+            except TimeoutException:
+                logger.warning("[worker] Toggle click timed out, proceeding without expanding")
+            except Exception as e:
+                logger.warning(f"[worker] Toggle click failed: {e}, proceeding without expanding")
+            logger.info("[worker] extraction: attempting to click toggle - DONE")
+
+        # Now parse the expanded content
         expander = soup.find("div", id="poExpander")
         if expander:
             for tr in expander.find_all("tr"):
@@ -368,13 +414,14 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
                 if len(tds) == 2:
                     item_pairs.append((safe_text(tds[0]), safe_text(tds[1])))
         else:
+            # Fallback: look for tr rows with 'po' class
             rows = soup.find_all("tr", class_=re.compile("a-spacing-small"), role="listitem")
             for r in rows:
                 if "po" in r.get("class", []):
                     spans = r.find_all("span")
                     if len(spans) >= 2:
                         item_pairs.append((safe_text(spans[0]), safe_text(spans[1])))
-        # Fallback if not item_pairs
+        # Fallback if still empty
         if not item_pairs:
             overview = soup.find("div", id="productOverview_feature_div")
             if overview:
@@ -382,22 +429,32 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
                     tds = tr.find_all("td")
                     if len(tds) == 2:
                         item_pairs.append((safe_text(tds[0]), safe_text(tds[1])))
-    except:
-        pass
+    except Exception as e:
+        logger.warning(f"[worker] Top highlights extraction failed: {e}")
     data['Top Highlights'] = boundary_format(item_pairs)
-    
-    # Item Details
+    logger.info("[worker] extraction: top highlights - DONE")
+
+    # --- Item Details (using Selenium find_element with timeout) ---
+    logger.info("[worker] extraction: item details - START")
     item_details_el = None
     try:
-        item_details_el = driver.find_element(By.ID, "item_details")
-    except:
-        pass
+        item_details_el = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "item_details"))
+        )
+    except TimeoutException:
+        logger.warning("[worker] Item details element not found within 10 seconds")
+    except Exception as e:
+        logger.warning(f"[worker] Error finding item details: {e}")
     data['Item Details'] = extract_item_details(item_details_el) if item_details_el else "Not Mentioned"
-    
-    # Variations
+    logger.info("[worker] extraction: item details - DONE")
+
+    # --- Variations ---
+    logger.info("[worker] extraction: variations - START")
     data['Variations'] = extract_variation_asins(source=soup)
-    
-    # Product Information
+    logger.info("[worker] extraction: variations - DONE")
+
+    # --- Product Information ---
+    logger.info("[worker] extraction: product information - START")
     info_pairs = []
     prod = soup.find("div", id="prodDetails")
     if prod:
@@ -406,7 +463,6 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
             td = tr.find("td")
             if th and td:
                 info_pairs.append((safe_text(th), safe_text(td)))
-    # Fallback if not info_pairs
     if not info_pairs:
         prod_alt = soup.find("div", id="productDetails_feature_div")
         if prod_alt:
@@ -416,8 +472,10 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
                 if th and td:
                     info_pairs.append((safe_text(th), safe_text(td)))
     data['Product Information'] = boundary_format(info_pairs)
-    
-    # Breadcrumbs and Categories
+    logger.info("[worker] extraction: product information - DONE")
+
+    # --- Breadcrumbs and Categories ---
+    logger.info("[worker] extraction: breadcrumbs - START")
     breadcrumbs = soup.find("div", id="wayfinding-breadcrumbs_feature_div")
     if breadcrumbs:
         spans = breadcrumbs.find_all("span", class_="a-list-item")
@@ -429,12 +487,16 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
         data['Category'] = "Not Mentioned"
         data['Sub Category'] = "Not Mentioned"
         data['BreadCrumb'] = "Not Mentioned"
-    
-    # Display Features
+    logger.info("[worker] extraction: breadcrumbs - DONE")
+
+    # --- Display Features ---
+    logger.info("[worker] extraction: display features - START")
     display = soup.find("div", id="offer-display-features")
     data['Display Features'] = safe_text(display)
-    
-    # Display Features 1 (detailed)
+    logger.info("[worker] extraction: display features - DONE")
+
+    # --- Display Features 1 (detailed) ---
+    logger.info("[worker] extraction: display features 1 - START")
     display_features = []
     try:
         display = soup.find("div", id="offer-display-features")
@@ -456,10 +518,13 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
                     except:
                         continue
         data['Display Features 1'] = "\n".join(display_features) if display_features else "Not Mentioned"
-    except:
+    except Exception as e:
+        logger.warning(f"[worker] Error extracting display features 1: {e}")
         data['Display Features 1'] = "Not Mentioned"
-    
-    # Merchant
+    logger.info("[worker] extraction: display features 1 - DONE")
+
+    # --- Merchant ---
+    logger.info("[worker] extraction: merchant - START")
     data['Merchant'] = "Not Mentioned"
     try:
         offer_display = soup.find("div", id="offer-display-features")
@@ -481,10 +546,13 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
                     data['Merchant'] = safe_text(merchant)
             else:
                 data['Merchant'] = safe_text(merchant)
-    except:
+    except Exception as e:
+        logger.warning(f"[worker] Error extracting merchant: {e}")
         data['Merchant'] = "Not Mentioned"
-    
-    # Product Images
+    logger.info("[worker] extraction: merchant - DONE")
+
+    # --- Product Images ---
+    logger.info("[worker] extraction: product images - START")
     data['Product Images'] = "Not Mentioned"
     data['Main Product Image'] = "Not Mentioned"
     try:
@@ -515,14 +583,18 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
             if imgs:
                 data['Main Product Image'] = imgs[0]
                 data['Product Images'] = ", ".join(imgs)
-    except:
-        pass
-    
-    # Comments
+    except Exception as e:
+        logger.warning(f"[worker] Error extracting product images: {e}")
+    logger.info("[worker] extraction: product images - DONE")
+
+    # --- Comments ---
+    logger.info("[worker] extraction: comments - START")
     comments = soup.find_all("div", class_="a-row a-spacing-small review-data")
     data['Comments'] = ",\n".join(safe_text(c) for c in comments[:7]) if comments else "Not Mentioned"
-    
-    # Seller Profile
+    logger.info("[worker] extraction: comments - DONE")
+
+    # --- Seller Profile ---
+    logger.info("[worker] extraction: seller profile - START")
     data['Seller Profile'] = "Not Mentioned"
     try:
         sellerProfile = soup.find("a", id="sellerProfileTriggerId")
@@ -530,29 +602,34 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
             href = sellerProfile.get("href", "").strip()
             if href:
                 data['Seller Profile'] = href
-    except:
-        pass
-    
-    # Availability
+    except Exception as e:
+        logger.warning(f"[worker] Error extracting seller profile: {e}")
+    logger.info("[worker] extraction: seller profile - DONE")
+
+    # --- Availability ---
+    logger.info("[worker] extraction: availability - START")
     availability_tag = soup.find("div", id="availability")
     avail_text = safe_text(availability_tag)
     data['Availability'] = "Available" if "In Stock" in avail_text and data['Price Box'] != "Not Mentioned" else "Not Available"
-    
-    # KeyWord column (all tr table data)
+    logger.info("[worker] extraction: availability - DONE")
+
+    # --- KeyWord column (all tr table data) ---
+    logger.info("[worker] extraction: keyword - START")
     try:
         data['KeyWord'] = scrape_tr_table(soup)
-    except:
+    except Exception as e:
+        logger.warning(f"[worker] Error extracting keyword: {e}")
         data['KeyWord'] = 'Not Mentioned'
-    
+    logger.info("[worker] extraction: keyword - DONE")
+
     # Create and return ProductData object from dictionary
     try:
-        return ProductData.from_dict(data)
+        product = ProductData.from_dict(data)
+        logger.info("[worker] extraction: ProductData creation successful")
+        return product
     except Exception as e:
-        logger.error(f"ProductData instantiation failed for {url}: {e}")
+        logger.error(f"[worker] ProductData instantiation failed for {url}: {e}")
         return ProductData.create_fallback(url=url, error=str(e))
-
-    # Extraction completed log
-    logger.info("[worker] Page extraction completed")
 
 
 def get_driver(chromedriver_path: str = "chromedriver.exe", headless: bool = False):

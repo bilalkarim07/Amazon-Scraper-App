@@ -3,6 +3,7 @@
 import json
 import threading
 from typing import Optional
+from utils.logger import logger   # <-- add this import
 
 
 class ProgressReporter:
@@ -19,9 +20,13 @@ class ProgressReporter:
             self._total = total
 
     def increment(self, n: int = 1) -> int:
+        logger.info(f"[progress] increment: acquiring lock")
         with self._lock:
+            logger.info(f"[progress] increment: lock acquired")
             self._processed += n
+            logger.info(f"[progress] increment: about to emit progress")
             self._emit_progress()
+            logger.info(f"[progress] increment: progress emitted")
             return self._processed
 
     def set_processed(self, value: int) -> None:
@@ -53,7 +58,9 @@ class ProgressReporter:
             "total": self._total,
             "percentage": round(self.progress_percentage, 1),
         }
+        logger.info(f"[progress] emitting JSON: {data}")
         print(json.dumps(data), flush=True)
+        logger.info(f"[progress] JSON emitted")
 
     def emit_started(self) -> None:
         """Emit a started event with the correct total."""

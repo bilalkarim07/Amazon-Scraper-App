@@ -49,7 +49,7 @@ class ThreadWorker:
             self.human_simulator = HumanSimulator(self.driver)
         except Exception as e:
             logger.error(f"Thread {self.thread_id} failed to create driver: {e}")
-            raise   # <-- propagate, do NOT return silently
+            raise
 
     def _write_fallback_row(self, writer, url: str, error: str):
         try:
@@ -70,7 +70,6 @@ class ThreadWorker:
             self._create_driver()
         except Exception as e:
             logger.error(f"Thread {self.thread_id} cannot start without driver: {e}")
-            # Re-raise so the main thread can handle the failure
             raise RuntimeError(f"Thread {self.thread_id} driver creation failed: {e}")
 
         logger.info(f"Thread {self.thread_id} started with {len(self.urls)} URLs")
@@ -85,7 +84,6 @@ class ThreadWorker:
                 total_urls = len(self.urls)
 
                 for idx, url in enumerate(self.urls, start=1):
-                    # --- cancellation check before URL ---
                     if self.cancel_check and self.cancel_check():
                         logger.info(f"Thread {self.thread_id} cancelled before URL {idx}.")
                         break
@@ -95,7 +93,6 @@ class ThreadWorker:
                     wait = self.first_page_wait if idx == 1 else self.next_page_wait
 
                     try:
-                        # pass cancel_check to extractor
                         product_data = self.scrape_function(
                             self.driver,
                             url,
@@ -108,7 +105,26 @@ class ThreadWorker:
                                 f"scrape_function returned {type(product_data).__name__}, expected ProductData"
                             )
 
+                        logger.info(f"[worker] ProductData creation successful for URL {idx}")
+
+                        # --- CSV WRITING ---
+                        logger.info(f"[worker] BEFORE result save for URL {idx}")
                         data_dict = product_data.to_dict()
+                        logger.info(f"[worker] data_dict created for URL {idx}")
+
+                        # Write row with explicit error handling
+                        try:
+                            row_data = {col: data_dict.get(col, "Not Mentioned") for col in self.columns}
+                            logger.info(f"[worker] row_data prepared for URL {idx}")
+                            writer.writerow(row_data)
+                            logger.info(f"[worker] writer.writerow() completed for URL {idx}")
+                            f.flush()
+                            logger.info(f"[worker] f.flush() completed for URL {idx}")
+                        except Exception as write_err:
+                            logger.error(f"[worker] CSV write error for URL {idx}: {write_err}")
+                            raise
+
+                        logger.info(f"[worker] AFTER result save for URL {idx}")
 
                         if idx < total_urls and self.human_simulator:
                             try:
@@ -116,17 +132,16 @@ class ThreadWorker:
                             except Exception:
                                 pass
 
-                        writer.writerow({col: data_dict.get(col, "Not Mentioned") for col in self.columns})
-                        f.flush()
-
                     except Exception as e:
                         logger.error(f"Thread {self.thread_id} error on URL {url}: {e}")
                         self._write_fallback_row(writer, url, str(e))
                         f.flush()
                     finally:
                         # progress increment after each URL (success or fallback)
+                        logger.info(f"[worker] BEFORE progress update for URL {idx}")
                         if self.progress_reporter:
                             self.progress_reporter.increment()
+                        logger.info(f"[worker] AFTER progress update for URL {idx}")
 
                 logger.info(f"Thread {self.thread_id} completed successfully")
 
@@ -136,7 +151,6 @@ class ThreadWorker:
             raise
 
         finally:
-            # --- ALWAYS close driver ---
             if self.driver:
                 try:
                     self.driver.quit()

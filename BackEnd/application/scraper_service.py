@@ -4,6 +4,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -150,6 +151,10 @@ def _run_engine(
 
     try:
         with open(log_path, "w", encoding="utf-8") as log_fh:
+            # --- Set unbuffered Python output to avoid pipe deadlock ---
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+
             proc = subprocess.Popen(
                 cmd,
                 cwd=str(config.ENGINE_ROOT),
@@ -157,6 +162,7 @@ def _run_engine(
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                env=env,  # <-- critical fix
             )
 
             # Register process for cancellation
@@ -172,6 +178,8 @@ def _run_engine(
                     log_fh.write(line)
                     log_fh.flush()
 
+                    logging.info(f"[parent] read line: {line.strip()}")
+
                     # Try to parse as JSON progress event
                     line_stripped = line.strip()
                     if line_stripped.startswith("{") and line_stripped.endswith("}"):
@@ -181,20 +189,18 @@ def _run_engine(
                                 processed = event.get("processed", 0)
                                 total = event.get("total", 0)
                                 job_service.update_progress(job_id, processed)
-                                # Also update total_rows if not set
                                 if total > 0:
                                     current = job_service.get_job(job_id)
                                     if current and current.get("total_rows", 0) == 0:
                                         job_service.update_job(job_id, total_rows=total)
                             elif event.get("event") == "completed":
                                 processed = event.get("processed", 0)
-                                # Final progress update
                                 job_service.update_progress(job_id, processed)
                             elif event.get("event") == "failed":
                                 error_msg = event.get("error", "Unknown engine error")
                                 job_service.mark_failed(job_id, error_msg)
                         except json.JSONDecodeError:
-                            pass  # Not a JSON line, continue
+                            pass
 
             finally:
                 proc.stdout.close()
@@ -215,10 +221,8 @@ def _run_engine(
                     processed_rows=processed_rows,
                 )
             else:
-                # Check if job was cancelled
                 job = job_service.get_job(job_id)
                 if job and job.get("status") == "cancelling":
-                    # Already marked cancelling; ensure it's cancelled
                     processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
                     job_service.mark_cancelled(job_id, processed_rows)
                 else:
@@ -244,43 +248,32 @@ def cancel_job(job_id: str) -> bool:
     if not job:
         return False
 
-    # Only running or created jobs can be cancelled
     if job.get("status") not in ("running", "created"):
         return False
 
-    # Mark as cancelling in database
     job_service.mark_cancelling(job_id)
 
-    # Create the .cancel flag file so the engine can detect cancellation cooperatively
     job_dir = config.JOBS_DIR / job_id
     cancel_file = job_dir / ".cancel"
     try:
         cancel_file.touch()
     except Exception as e:
-        # If we can't create the file, log but continue (subprocess termination will still occur)
-        import logging
         logging.warning(f"Could not create .cancel file for job {job_id}: {e}")
 
-    # Get the subprocess and terminate it
     with _process_lock:
         proc = _running_processes.get(job_id)
 
     if proc:
         try:
-            # Send SIGTERM (works on Windows via terminate())
             proc.terminate()
-            # Wait up to 10 seconds for the process to exit cleanly
             try:
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                # Force kill if it doesn't respond
                 proc.kill()
                 proc.wait()
         except Exception as e:
-            import logging
             logging.warning(f"Error terminating subprocess for job {job_id}: {e}")
 
-    # Mark as cancelled (processed_rows will be updated by the engine or we'll count what exists)
     output_file = job.get("output_file")
     processed_rows = 0
     if output_file and Path(output_file).is_file():
