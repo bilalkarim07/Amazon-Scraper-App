@@ -1,0 +1,30 @@
+# Python virtual environments
+BackEnd/.venv/
+ScraperEngine/.venv/
+
+# Scraper local/browser files
+ScraperEngine/chromedriver.exe
+
+# Backend generated/local data
+BackEnd/data/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Node
+node_modules/
+dist/
+
+# Generated CSV/output files
+*.csv
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.vscode/
