@@ -19,7 +19,6 @@ class AmazonScraper:
         max_threads: int = 3,
         webdriver_file: str = None,
         workspace_dir: str = None,
-        # NEW marketplace parameters
         marketplace: str = "US",
         base_url: str = "https://www.amazon.com/",
         currency_code: str = "USD",
@@ -29,7 +28,6 @@ class AmazonScraper:
         self.max_threads = min(max(1, max_threads), 5)
         self.webdriver_file = webdriver_file
 
-        # Store new parameters
         self.marketplace = marketplace
         self.base_url = base_url
         self.currency_code = currency_code
@@ -37,7 +35,7 @@ class AmazonScraper:
 
         if workspace_dir:
             self.thread_folder = os.path.join(workspace_dir, "workspace")
-            self._temp_extract_file = os.path.join(workspace_dir, "raw.csv")
+            self._temp_extract_file = os.path.join(self.thread_folder, "raw.csv")
         else:
             self.thread_folder = "Threads"
             self._temp_extract_file = "temp_extracted.csv"
@@ -145,7 +143,6 @@ class AmazonScraper:
         next_page_wait: int = 5,
         headless: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None
-        
     ) -> str:
         logger.info("=" * 60)
         logger.info("STARTING AMAZON PRODUCT EXTRACTION")
@@ -178,7 +175,7 @@ class AmazonScraper:
                 headless=headless,
                 progress_reporter=progress_reporter,
                 cancel_check=cancel_check,
-                base_url=self.base_url,   # <-- add this
+                base_url=self.base_url,
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
@@ -194,6 +191,14 @@ class AmazonScraper:
         progress_reporter.emit_completed()
 
         self._merge_results(output_file)
+
+        # --- FIX: Create empty CSV if no data was scraped ---
+        if not os.path.exists(output_file):
+            import csv
+            with open(output_file, 'w', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=self.columns)
+                writer.writeheader()
+            logger.warning(f"Created empty output file: {output_file}")
 
         logger.info("=" * 60)
         logger.info("EXTRACTION COMPLETED SUCCESSFULLY")
@@ -238,19 +243,16 @@ class AmazonScraper:
         next_page_wait: int = 5,
         headless: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
-        # NEW optional parameters – if provided, they override instance vars
         marketplace: Optional[str] = None,
         base_url: Optional[str] = None,
         currency_code: Optional[str] = None,
         currency_symbol: Optional[str] = None,
     ) -> str:
-        # Use provided values or fallback to instance variables
         final_marketplace = marketplace if marketplace is not None else self.marketplace
         final_base_url = base_url if base_url is not None else self.base_url
         final_currency_code = currency_code if currency_code is not None else self.currency_code
         final_currency_symbol = currency_symbol if currency_symbol is not None else self.currency_symbol
 
-        # Determine price_symbol and base_append: if not explicitly provided, use currency_symbol and base_url
         final_price_symbol = price_symbol if price_symbol is not None else final_currency_symbol
         final_base_append = base_append if base_append is not None else final_base_url
 

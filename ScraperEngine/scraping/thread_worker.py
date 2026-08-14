@@ -48,6 +48,7 @@ class ThreadWorker:
             driver_manager = DriverManager(self.webdriver_path, headless=self.headless)
             self.driver = driver_manager.create_driver()
             self.human_simulator = HumanSimulator(self.driver)
+            return self.driver   # <-- ADD THIS LINE
         except Exception as e:
             logger.error(f"Thread {self.thread_id} failed to create driver: {e}")
             raise
@@ -69,36 +70,26 @@ class ThreadWorker:
 
     def run(self):
         try:
-            self.driver = self._create_driver()
-            
-            # --- VISIT HOMEPAGE AND WAIT ---
+            self._create_driver()   # driver is created and stored in self.driver
+
             logger.info(f"Thread {self.thread_id} visiting homepage: {self.base_url}")
             self.driver.get(self.base_url)
-            time.sleep(self.first_page_wait)   # first_page_wait is in seconds
+            time.sleep(self.first_page_wait)
             logger.info(f"Thread {self.thread_id} homepage wait complete")
 
-            logger.info(f"Thread {self.thread_id} started with {len(self.urls)} URLs")
-
             output_path = self._get_output_path()
-
             with open(output_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self.columns)
                 writer.writeheader()
 
                 total_urls = len(self.urls)
-
                 for idx, url in enumerate(self.urls, start=1):
                     if self.cancel_check and self.cancel_check():
                         logger.info(f"Thread {self.thread_id} cancelled before URL {idx}.")
                         break
 
                     logger.info(f"Thread {self.thread_id} processing {idx}/{total_urls} links")
-
-                    # --- Wait time for this URL: first_page_wait is already used for homepage,
-                    # now we use next_page_wait for all product pages (or could keep first for the first product)
-                    # The original logic used first_page_wait for the first URL; we'll change to use next_page_wait always,
-                    # but we keep the original behavior by using next_page_wait for all product pages.
-                    wait = self.next_page_wait   # changed: always use next_page_wait
+                    wait = self.next_page_wait   # product pages use next_page_wait
 
                     try:
                         product_data = self.scrape_function(
@@ -107,30 +98,19 @@ class ThreadWorker:
                             wait,
                             cancel_check=self.cancel_check
                         )
-
                         if not isinstance(product_data, ProductData):
-                            raise TypeError(
-                                f"scrape_function returned {type(product_data).__name__}, expected ProductData"
-                            )
+                            raise TypeError(f"Expected ProductData, got {type(product_data).__name__}")
 
-                        logger.info(f"[worker] ProductData creation successful for URL {idx}")
-
-                        # CSV WRITING
                         data_dict = product_data.to_dict()
                         row_data = {col: data_dict.get(col, "Not Mentioned") for col in self.columns}
                         writer.writerow(row_data)
                         f.flush()
 
-                        if idx < total_urls and self.human_simulator:
-                            try:
-                                self.human_simulator.random_sleep(2, 4)
-                            except Exception:
-                                pass
-
                     except Exception as e:
                         logger.error(f"Thread {self.thread_id} error on URL {url}: {e}")
                         self._write_fallback_row(writer, url, str(e))
                         f.flush()
+
                     finally:
                         if self.progress_reporter:
                             self.progress_reporter.increment()
