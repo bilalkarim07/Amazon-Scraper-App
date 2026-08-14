@@ -27,6 +27,7 @@ class ThreadWorker:
         headless=False,
         progress_reporter: Optional[ProgressReporter] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
+        base_url: str = "https://www.amazon.com/",   # NEW
     ):
         self.thread_id = thread_id
         self.urls = urls
@@ -65,18 +66,21 @@ class ThreadWorker:
     def _get_output_path(self):
         return os.path.join(self.output_folder, f"thread_{self.thread_id}.csv")
 
+
     def run(self):
         try:
-            self._create_driver()
-        except Exception as e:
-            logger.error(f"Thread {self.thread_id} cannot start without driver: {e}")
-            raise RuntimeError(f"Thread {self.thread_id} driver creation failed: {e}")
+            self.driver = self._create_driver()
+            
+            # --- VISIT HOMEPAGE AND WAIT ---
+            logger.info(f"Thread {self.thread_id} visiting homepage: {self.base_url}")
+            self.driver.get(self.base_url)
+            time.sleep(self.first_page_wait)   # first_page_wait is in seconds
+            logger.info(f"Thread {self.thread_id} homepage wait complete")
 
-        logger.info(f"Thread {self.thread_id} started with {len(self.urls)} URLs")
+            logger.info(f"Thread {self.thread_id} started with {len(self.urls)} URLs")
 
-        output_path = self._get_output_path()
+            output_path = self._get_output_path()
 
-        try:
             with open(output_path, "w", newline="", encoding="utf-8") as f:
                 writer = csv.DictWriter(f, fieldnames=self.columns)
                 writer.writeheader()
@@ -90,7 +94,11 @@ class ThreadWorker:
 
                     logger.info(f"Thread {self.thread_id} processing {idx}/{total_urls} links")
 
-                    wait = self.first_page_wait if idx == 1 else self.next_page_wait
+                    # --- Wait time for this URL: first_page_wait is already used for homepage,
+                    # now we use next_page_wait for all product pages (or could keep first for the first product)
+                    # The original logic used first_page_wait for the first URL; we'll change to use next_page_wait always,
+                    # but we keep the original behavior by using next_page_wait for all product pages.
+                    wait = self.next_page_wait   # changed: always use next_page_wait
 
                     try:
                         product_data = self.scrape_function(
@@ -107,24 +115,11 @@ class ThreadWorker:
 
                         logger.info(f"[worker] ProductData creation successful for URL {idx}")
 
-                        # --- CSV WRITING ---
-                        logger.info(f"[worker] BEFORE result save for URL {idx}")
+                        # CSV WRITING
                         data_dict = product_data.to_dict()
-                        logger.info(f"[worker] data_dict created for URL {idx}")
-
-                        # Write row with explicit error handling
-                        try:
-                            row_data = {col: data_dict.get(col, "Not Mentioned") for col in self.columns}
-                            logger.info(f"[worker] row_data prepared for URL {idx}")
-                            writer.writerow(row_data)
-                            logger.info(f"[worker] writer.writerow() completed for URL {idx}")
-                            f.flush()
-                            logger.info(f"[worker] f.flush() completed for URL {idx}")
-                        except Exception as write_err:
-                            logger.error(f"[worker] CSV write error for URL {idx}: {write_err}")
-                            raise
-
-                        logger.info(f"[worker] AFTER result save for URL {idx}")
+                        row_data = {col: data_dict.get(col, "Not Mentioned") for col in self.columns}
+                        writer.writerow(row_data)
+                        f.flush()
 
                         if idx < total_urls and self.human_simulator:
                             try:
@@ -137,19 +132,14 @@ class ThreadWorker:
                         self._write_fallback_row(writer, url, str(e))
                         f.flush()
                     finally:
-                        # progress increment after each URL (success or fallback)
-                        logger.info(f"[worker] BEFORE progress update for URL {idx}")
                         if self.progress_reporter:
                             self.progress_reporter.increment()
-                        logger.info(f"[worker] AFTER progress update for URL {idx}")
 
                 logger.info(f"Thread {self.thread_id} completed successfully")
 
         except Exception as e:
             logger.error(f"Thread {self.thread_id} fatal error: {e}")
-            # Propagate so the overall job fails
             raise
-
         finally:
             if self.driver:
                 try:

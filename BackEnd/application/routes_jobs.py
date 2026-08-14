@@ -107,25 +107,25 @@ async def create_job(
         currency_code = "AUTO"
         currency_symbol = "AUTO"
 
-    # --- CHECK QUOTA BEFORE STARTING ---
-    if total_rows > 0:
-        success, error_msg = quota_service.reserve_quota(total_rows)
-        if not success:
-            quota = quota_service.get_quota()
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail={
-                    "error": "QUOTA_EXCEEDED",
-                    "message": error_msg,
-                    "daily_limit": quota["daily_limit"],
-                    "used": quota["used"],
-                    "remaining": quota["remaining"],
-                    "requested": total_rows,
-                },
-            )
-    else:
-        # No rows, reserve 0 (should not happen, but safe)
-        quota_service.reserve_quota(0)
+    # # --- CHECK QUOTA BEFORE STARTING ---
+    # if total_rows > 0:
+    #     success, error_msg = quota_service.reserve_quota(total_rows)
+    #     if not success:
+    #         quota = quota_service.get_quota()
+    #         raise HTTPException(
+    #             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+    #             detail={
+    #                 "error": "QUOTA_EXCEEDED",
+    #                 "message": error_msg,
+    #                 "daily_limit": quota["daily_limit"],
+    #                 "used": quota["used"],
+    #                 "remaining": quota["remaining"],
+    #                 "requested": total_rows,
+    #             },
+    #         )
+    # else:
+    #     # No rows, reserve 0 (should not happen, but safe)
+    #     quota_service.reserve_quota(0)
 
     # --- Validate / sanitise output filename ---
     output_filename = output_filename.strip()

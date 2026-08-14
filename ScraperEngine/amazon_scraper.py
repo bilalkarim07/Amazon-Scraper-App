@@ -145,6 +145,7 @@ class AmazonScraper:
         next_page_wait: int = 5,
         headless: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None
+        
     ) -> str:
         logger.info("=" * 60)
         logger.info("STARTING AMAZON PRODUCT EXTRACTION")
@@ -177,6 +178,7 @@ class AmazonScraper:
                 headless=headless,
                 progress_reporter=progress_reporter,
                 cancel_check=cancel_check,
+                base_url=self.base_url,   # <-- add this
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
