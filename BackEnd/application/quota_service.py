@@ -115,3 +115,42 @@ def get_quota_for_frontend() -> dict:
         "remaining": quota["remaining"],
         "date": quota["quota_date"]
     }
+def consume_quota(rows_to_consume: int) -> bool:
+    """
+    Atomically consume a specific number of quota rows.
+    Returns True if successful, False if insufficient remaining quota.
+    """
+    if rows_to_consume < 0:
+        return False
+    if rows_to_consume == 0:
+        return True
+
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT daily_limit, used, quota_date FROM quota WHERE id = 1"
+        ).fetchone()
+
+        today = date.today().isoformat()
+        used = row["used"]
+        daily_limit = row["daily_limit"]
+
+        # Reset if new day
+        if row["quota_date"] != today:
+            used = 0
+            conn.execute(
+                "UPDATE quota SET used = 0, quota_date = ? WHERE id = 1",
+                (today,)
+            )
+
+        remaining = daily_limit - used
+        if rows_to_consume > remaining:
+            conn.rollback()
+            return False
+
+        conn.execute(
+            "UPDATE quota SET used = used + ? WHERE id = 1",
+            (rows_to_consume,)
+        )
+        conn.commit()
+        return True

@@ -13,25 +13,19 @@ from typing import Optional, Dict
 
 from application import config
 from application import job_service
-from application import quota_service   # for consume_quota
+from application import quota_service
 
-# --- Global registry of running subprocesses ---
 _running_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
 
 
 def _get_base_url(marketplace: str) -> str:
-    """Get base URL from marketplace config."""
     from application.marketplace_config import get_marketplace
     cfg = get_marketplace(marketplace)
     if cfg:
         return cfg.get("base_url", "https://www.amazon.com/")
     return "https://www.amazon.com/"
 
-
-# ---------------------------------------------------------------------------
-# Public entrypoint
-# ---------------------------------------------------------------------------
 
 def start_job(
     job_id: str,
@@ -51,7 +45,6 @@ def start_job(
     job_dir = config.JOBS_DIR / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
-    # --- 1. Normalise + save the input CSV ---
     try:
         total_rows, input_csv_path = _save_normalised_csv(
             csv_bytes=csv_bytes,
@@ -63,11 +56,8 @@ def start_job(
         return
 
     job_service.update_job(job_id, total_rows=total_rows)
-
-    # --- 2. Determine output path ---
     output_csv_path = job_dir / output_filename
 
-    # --- 3. Launch subprocess in background thread ---
     bg = threading.Thread(
         target=_run_engine,
         args=(
@@ -81,80 +71,31 @@ def start_job(
     bg.start()
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-def _save_normalised_csv(
-    csv_bytes: bytes,
-    column_name: str,
-    job_dir: Path,
-) -> tuple[int, Path]:
+def _save_normalised_csv(csv_bytes: bytes, column_name: str, job_dir: Path) -> tuple[int, Path]:
     text = csv_bytes.decode("utf-8-sig")
     reader = csv.DictReader(io.StringIO(text))
-
     if reader.fieldnames is None or column_name not in reader.fieldnames:
         available = list(reader.fieldnames or [])
-        raise ValueError(
-            f"Column '{column_name}' not found in uploaded CSV. "
-            f"Available columns: {available}"
-        )
-
+        raise ValueError(f"Column '{column_name}' not found. Available: {available}")
     rows = []
     for row in reader:
         row["Product Link"] = row.pop(column_name)
         rows.append(row)
-
     if not rows:
         raise ValueError("Uploaded CSV contains no data rows.")
-
-    new_fieldnames = [
-        "Product Link" if f == column_name else f
-        for f in reader.fieldnames
-    ]
-
+    new_fieldnames = ["Product Link" if f == column_name else f for f in reader.fieldnames]
     input_csv_path = job_dir / "input.csv"
     with open(input_csv_path, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=new_fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
-
     return len(rows), input_csv_path
 
 
 def _count_csv_rows(path: Path) -> int:
-    """Count rows (excluding header) in a CSV file."""
     try:
         with open(path, "r", encoding="utf-8") as fh:
-            reader = csv.reader(fh)
-            total_rows = sum(1 for _ in reader)
-            return max(0, total_rows - 1)
-    except Exception:
-        return 0
-
-
-def _count_valid_rows(csv_path: Path) -> int:
-    """
-    Count rows that have at least one non‑empty key field.
-    Used to determine how many rows actually produced meaningful data.
-    """
-    try:
-        import pandas as pd
-        df = pd.read_csv(csv_path)
-        if df.empty:
-            return 0
-
-        # Columns that indicate a successful scrape (adjust as needed)
-        key_cols = ["Title", "Price Box", "ASIN"]
-
-        valid = 0
-        for _, row in df.iterrows():
-            for col in key_cols:
-                val = str(row.get(col, "")).strip()
-                if val and val.lower() != "not mentioned":
-                    valid += 1
-                    break
-        return valid
+            return max(0, sum(1 for _ in csv.reader(fh)) - 1)
     except Exception:
         return 0
 
@@ -162,8 +103,7 @@ def _count_valid_rows(csv_path: Path) -> int:
 def _tail_log(path: Path, lines: int = 20) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as fh:
-            all_lines = fh.readlines()
-            return "".join(all_lines[-lines:])
+            return "".join(fh.readlines()[-lines:])
     except Exception:
         return ""
 
@@ -182,7 +122,7 @@ def _run_engine(
     currency_code: str,
     currency_symbol: str,
 ) -> None:
-    """Run the ScraperEngine subprocess, then consume quota for valid rows."""
+    """Run the ScraperEngine subprocess, then settle quota based on successful rows."""
     job_service.mark_running(job_id)
 
     cmd = [
@@ -205,6 +145,8 @@ def _run_engine(
         cmd.append("--headless")
 
     log_path = job_dir / "runner.log"
+    successful_rows = 0
+    requested_rows = 0
 
     try:
         with open(log_path, "w", encoding="utf-8") as log_fh:
@@ -232,8 +174,6 @@ def _run_engine(
                     log_fh.write(line)
                     log_fh.flush()
 
-                    logging.info(f"[parent] read line: {line.strip()}")
-
                     line_stripped = line.strip()
                     if line_stripped.startswith("{") and line_stripped.endswith("}"):
                         try:
@@ -247,6 +187,7 @@ def _run_engine(
                                     if current and current.get("total_rows", 0) == 0:
                                         job_service.update_job(job_id, total_rows=total)
                             elif event.get("event") == "completed":
+                                successful_rows = event.get("successful", 0)
                                 processed = event.get("processed", 0)
                                 job_service.update_progress(job_id, processed)
                             elif event.get("event") == "failed":
@@ -263,27 +204,20 @@ def _run_engine(
             with _process_lock:
                 _running_processes.pop(job_id, None)
 
-            # --- Determine processed rows for display ---
-            if output_csv_path.is_file():
-                processed_rows = _count_csv_rows(output_csv_path)
-            else:
-                processed_rows = 0
+            # Determine processed rows for display
+            processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
 
-            # --- Determine valid rows for quota consumption ---
-            if output_csv_path.is_file():
-                valid_rows = _count_valid_rows(output_csv_path)
-            else:
-                valid_rows = 0
+            # Get requested rows from job record
+            job = job_service.get_job(job_id)
+            requested_rows = job.get("requested_rows", 0) if job else 0
 
-            # --- Consume quota for valid rows (atomic) ---
-            if valid_rows > 0:
-                success = quota_service.consume_quota(valid_rows)
-                if not success:
-                    logging.warning(f"Failed to consume quota for {valid_rows} rows (insufficient remaining).")
-            else:
-                logging.info(f"No valid rows to consume quota for job {job_id}")
+            # --- SETTLE QUOTA (idempotent) ---
+            # We settle regardless of final status, but only once per job.
+            if requested_rows > 0:
+                # settle_quota checks quota_settled internally, so it's safe to call multiple times.
+                quota_service.settle_quota(job_id, requested_rows, successful_rows)
 
-            # --- Update job status based on return code ---
+            # --- Update job status ---
             if return_code == 0 and output_csv_path.is_file():
                 job_service.mark_completed(
                     job_id,
@@ -291,7 +225,7 @@ def _run_engine(
                     processed_rows=processed_rows,
                 )
             else:
-                job = job_service.get_job(job_id)
+                job = job_service.get_job(job_id)  # refresh
                 if job and job.get("status") == "cancelling":
                     job_service.mark_cancelled(job_id, processed_rows)
                 else:
@@ -304,7 +238,11 @@ def _run_engine(
     except Exception as exc:
         with _process_lock:
             _running_processes.pop(job_id, None)
-        # On exception, consume 0 quota (no valid rows)
+        # On exception, release reserved quota (but don't consume)
+        job = job_service.get_job(job_id)
+        requested = job.get("requested_rows", 0) if job else 0
+        if requested > 0:
+            quota_service.release_reserved(job_id, requested)
         job_service.mark_failed(job_id, str(exc))
 
 
@@ -344,14 +282,6 @@ def cancel_job(job_id: str) -> bool:
         except Exception as e:
             logging.warning(f"Error terminating subprocess for job {job_id}: {e}")
 
-    # The actual quota consumption will happen in _run_engine when the process exits.
-    # We just mark cancelled; no release/consume here.
-
-    # Determine final processed rows for display (if any output exists)
-    output_file = job.get("output_file")
-    processed_rows = 0
-    if output_file and Path(output_file).is_file():
-        processed_rows = _count_csv_rows(Path(output_file))
-
-    job_service.mark_cancelled(job_id, processed_rows)
+    # After cancellation, the engine will exit and _run_engine will settle quota.
+    # No immediate quota action here.
     return True

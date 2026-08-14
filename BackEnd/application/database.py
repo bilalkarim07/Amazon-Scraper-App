@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     currency_code TEXT,
     currency_symbol TEXT,
     requested_rows INTEGER DEFAULT 0,
-    quota_used INTEGER DEFAULT 0
+    quota_used INTEGER DEFAULT 0,
+    quota_settled INTEGER DEFAULT 0      -- NEW: 0 = not settled, 1 = settled
 );
 """
 
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS quota (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     daily_limit INTEGER NOT NULL,
     used INTEGER NOT NULL DEFAULT 0,
+    reserved INTEGER NOT NULL DEFAULT 0,   -- NEW: currently reserved capacity
     quota_date TEXT NOT NULL,
     last_updated TEXT DEFAULT CURRENT_TIMESTAMP
 );
@@ -42,19 +44,25 @@ def init_db() -> None:
         conn.execute(_CREATE_QUOTA_TABLE)
         
         # Add new columns to jobs if they don't exist
-        for col in ["requested_rows", "quota_used"]:
+        for col in ["requested_rows", "quota_used", "quota_settled"]:
             try:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
+        
+        # Add reserved column to quota if not exists
+        try:
+            conn.execute("ALTER TABLE quota ADD COLUMN reserved INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
         
         # Initialize quota if not exists
         from application.config import DAILY_QUOTA_LIMIT
         from datetime import date
         today = date.today().isoformat()
         conn.execute("""
-            INSERT OR IGNORE INTO quota (id, daily_limit, used, quota_date)
-            VALUES (1, ?, 0, ?)
+            INSERT OR IGNORE INTO quota (id, daily_limit, used, reserved, quota_date)
+            VALUES (1, ?, 0, 0, ?)
         """, (DAILY_QUOTA_LIMIT, today))
         conn.commit()
 

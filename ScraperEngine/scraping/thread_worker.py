@@ -5,6 +5,7 @@ ThreadWorker - Encapsulates one thread's scraping lifecycle.
 import os
 import csv
 import time
+import json
 from models import ProductData
 from utils.driver_manager import DriverManager
 from utils.human_simulator import HumanSimulator
@@ -28,7 +29,7 @@ class ThreadWorker:
         progress_reporter: Optional[ProgressReporter] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
         base_url: str = "https://www.amazon.com/",
-        exception_callback: Optional[Callable[[Exception], None]] = None,  # NEW
+        exception_callback: Optional[Callable[[Exception], None]] = None,
     ):
         self.thread_id = thread_id
         self.urls = urls
@@ -44,14 +45,14 @@ class ThreadWorker:
         self.progress_reporter = progress_reporter or ProgressReporter()
         self.cancel_check = cancel_check
         self.base_url = base_url
-        self.exception_callback = exception_callback  # NEW
+        self.exception_callback = exception_callback
 
     def _create_driver(self):
         try:
             driver_manager = DriverManager(self.webdriver_path, headless=self.headless)
             self.driver = driver_manager.create_driver()
             self.human_simulator = HumanSimulator(self.driver)
-            return self.driver   # <-- return driver
+            return self.driver
         except Exception as e:
             logger.error(f"Thread {self.thread_id} failed to create driver: {e}")
             raise
@@ -71,8 +72,12 @@ class ThreadWorker:
         return os.path.join(self.output_folder, f"thread_{self.thread_id}.csv")
 
     def run(self):
+        success_count = 0
+        failure_count = 0
+        total_urls = len(self.urls)
+
         try:
-            self._create_driver()   # driver is created and stored in self.driver
+            self._create_driver()
 
             logger.info(f"Thread {self.thread_id} visiting homepage: {self.base_url}")
             self.driver.get(self.base_url)
@@ -84,14 +89,13 @@ class ThreadWorker:
                 writer = csv.DictWriter(f, fieldnames=self.columns)
                 writer.writeheader()
 
-                total_urls = len(self.urls)
                 for idx, url in enumerate(self.urls, start=1):
                     if self.cancel_check and self.cancel_check():
                         logger.info(f"Thread {self.thread_id} cancelled before URL {idx}.")
                         break
 
                     logger.info(f"Thread {self.thread_id} processing {idx}/{total_urls} links")
-                    wait = self.next_page_wait   # product pages use next_page_wait
+                    wait = self.next_page_wait
 
                     try:
                         product_data = self.scrape_function(
@@ -103,6 +107,13 @@ class ThreadWorker:
                         if not isinstance(product_data, ProductData):
                             raise TypeError(f"Expected ProductData, got {type(product_data).__name__}")
 
+                        # Determine if this is a success or fallback
+                        is_fallback = getattr(product_data, 'is_fallback', False)
+                        if is_fallback:
+                            failure_count += 1
+                        else:
+                            success_count += 1
+
                         data_dict = product_data.to_dict()
                         row_data = {col: data_dict.get(col, "Not Mentioned") for col in self.columns}
                         writer.writerow(row_data)
@@ -112,19 +123,23 @@ class ThreadWorker:
                         logger.error(f"Thread {self.thread_id} error on URL {url}: {e}")
                         self._write_fallback_row(writer, url, str(e))
                         f.flush()
+                        failure_count += 1
 
                     finally:
                         if self.progress_reporter:
                             self.progress_reporter.increment()
 
-                logger.info(f"Thread {self.thread_id} completed successfully")
+            logger.info(f"Thread {self.thread_id} completed. Success: {success_count}, Failed: {failure_count}")
+
+            # Emit a completed event with success/failure counts (if progress reporter supports it)
+            if self.progress_reporter:
+                self.progress_reporter.emit_completed_with_counts(success_count, failure_count, total_urls)
 
         except Exception as e:
             logger.error(f"Thread {self.thread_id} fatal error: {e}")
-            # NEW: propagate the exception to the main thread via callback
             if self.exception_callback:
                 self.exception_callback(e)
-            raise   # re-raise to ensure the thread exits with failure
+            raise
         finally:
             if self.driver:
                 try:

@@ -72,6 +72,10 @@ class ProgressReporter:
         print(json.dumps(data), flush=True)
         logger.info("[progress] JSON emitted")
 
+    def _emit(self, event: dict) -> None:
+        """Emit a generic JSON event to stdout. Does NOT acquire the lock."""
+        print(json.dumps(event), flush=True)
+
     def emit_started(self) -> None:
         """Emit a started event with the correct total."""
         with self._lock:
@@ -80,7 +84,7 @@ class ProgressReporter:
                 "processed": 0,
                 "total": self._total,
             }
-        print(json.dumps(data), flush=True)
+        self._emit(data)
 
     def emit_completed(self) -> None:
         """Emit a completed event."""
@@ -90,7 +94,7 @@ class ProgressReporter:
                 "processed": self._processed,
                 "total": self._total,
             }
-        print(json.dumps(data), flush=True)
+        self._emit(data)
 
     def emit_failed(self, error: str) -> None:
         """Emit a failed event."""
@@ -101,7 +105,7 @@ class ProgressReporter:
                 "processed": self._processed,
                 "total": self._total,
             }
-        print(json.dumps(data), flush=True)
+        self._emit(data)
 
     def mark_cancelled(self) -> None:
         self._cancelled = True
@@ -109,3 +113,15 @@ class ProgressReporter:
     @property
     def is_cancelled(self) -> bool:
         return self._cancelled
+
+    def emit_completed_with_counts(self, success: int, failed: int, total: int):
+        """Emit a completed event with detailed success/failure counts."""
+        with self._lock:
+            data = {
+                "event": "completed",
+                "total": total,
+                "successful": success,
+                "failed": failed,
+                "processed": success + failed,
+            }
+        self._emit(data)

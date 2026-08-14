@@ -161,6 +161,14 @@ class AmazonScraper:
         progress_reporter = ProgressReporter(total=total_urls)
         progress_reporter.emit_started()
 
+        # --- Worker exception collection ---
+        worker_exceptions = []
+        exception_lock = threading.Lock()
+
+        def record_exception(exc):
+            with exception_lock:
+                worker_exceptions.append(exc)
+
         threads = []
         for i, chunk in enumerate(url_chunks, start=1):
             worker = ThreadWorker(
@@ -176,6 +184,7 @@ class AmazonScraper:
                 progress_reporter=progress_reporter,
                 cancel_check=cancel_check,
                 base_url=self.base_url,
+                exception_callback=record_exception,   # <-- pass callback
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
@@ -188,17 +197,22 @@ class AmazonScraper:
             logger.info(f"[runner] AFTER thread join for thread {idx+1}")
 
         logger.info("All threads completed")
+
+        # --- Check for worker exceptions ---
+        if worker_exceptions:
+            error_msg = f"Worker thread(s) failed: {worker_exceptions[0]}"
+            logger.error(error_msg)
+            progress_reporter.emit_failed(error_msg)
+            raise RuntimeError(error_msg)
+
         progress_reporter.emit_completed()
 
         self._merge_results(output_file)
 
-        # --- FIX: Create empty CSV if no data was scraped ---
+        # --- No empty CSV fallback ---
+        # If output_file does not exist, raise an error.
         if not os.path.exists(output_file):
-            import csv
-            with open(output_file, 'w', newline='', encoding='utf-8') as f:
-                writer = csv.DictWriter(f, fieldnames=self.columns)
-                writer.writeheader()
-            logger.warning(f"Created empty output file: {output_file}")
+            raise RuntimeError("No output file created – all workers failed or produced no data.")
 
         logger.info("=" * 60)
         logger.info("EXTRACTION COMPLETED SUCCESSFULLY")

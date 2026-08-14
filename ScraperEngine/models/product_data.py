@@ -102,6 +102,8 @@ class ProductData:
     comments: str = "Not Mentioned"
     variations: str = "Not Mentioned"
     availability: str = "Not Mentioned"
+
+    is_fallback = False 
     
     # Keyword Information - structured as list of KeywordInformation objects
     keyword_information: List[KeywordInformation] = field(default_factory=list)
@@ -295,3 +297,9 @@ class ProductData:
             return f"Product: {safe_str(self.title)} (ASIN: {safe_str(self.asin)})"
         except Exception:
             return "Product: <unavailable>"
+    
+    @classmethod
+    def create_fallback(cls, url: str, error: str):
+        instance = cls(...)
+        instance.is_fallback = True
+        return instance
