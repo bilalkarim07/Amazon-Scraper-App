@@ -27,7 +27,8 @@ class ThreadWorker:
         headless=False,
         progress_reporter: Optional[ProgressReporter] = None,
         cancel_check: Optional[Callable[[], bool]] = None,
-        base_url: str = "https://www.amazon.com/",   # NEW
+        base_url: str = "https://www.amazon.com/",
+        exception_callback: Optional[Callable[[Exception], None]] = None,  # NEW
     ):
         self.thread_id = thread_id
         self.urls = urls
@@ -42,13 +43,15 @@ class ThreadWorker:
         self.human_simulator = None
         self.progress_reporter = progress_reporter or ProgressReporter()
         self.cancel_check = cancel_check
+        self.base_url = base_url
+        self.exception_callback = exception_callback  # NEW
 
     def _create_driver(self):
         try:
             driver_manager = DriverManager(self.webdriver_path, headless=self.headless)
             self.driver = driver_manager.create_driver()
             self.human_simulator = HumanSimulator(self.driver)
-            return self.driver   # <-- ADD THIS LINE
+            return self.driver   # <-- return driver
         except Exception as e:
             logger.error(f"Thread {self.thread_id} failed to create driver: {e}")
             raise
@@ -66,7 +69,6 @@ class ThreadWorker:
 
     def _get_output_path(self):
         return os.path.join(self.output_folder, f"thread_{self.thread_id}.csv")
-
 
     def run(self):
         try:
@@ -119,7 +121,10 @@ class ThreadWorker:
 
         except Exception as e:
             logger.error(f"Thread {self.thread_id} fatal error: {e}")
-            raise
+            # NEW: propagate the exception to the main thread via callback
+            if self.exception_callback:
+                self.exception_callback(e)
+            raise   # re-raise to ensure the thread exits with failure
         finally:
             if self.driver:
                 try:
