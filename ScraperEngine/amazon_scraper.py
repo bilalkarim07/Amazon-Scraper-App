@@ -18,11 +18,22 @@ class AmazonScraper:
         listings: Union[str, List[str]],
         max_threads: int = 3,
         webdriver_file: str = None,
-        workspace_dir: str = None
+        workspace_dir: str = None,
+        # NEW marketplace parameters
+        marketplace: str = "US",
+        base_url: str = "https://www.amazon.com/",
+        currency_code: str = "USD",
+        currency_symbol: str = "$",
     ):
         self.listings = listings
         self.max_threads = min(max(1, max_threads), 5)
         self.webdriver_file = webdriver_file
+
+        # Store new parameters
+        self.marketplace = marketplace
+        self.base_url = base_url
+        self.currency_code = currency_code
+        self.currency_symbol = currency_symbol
 
         if workspace_dir:
             self.thread_folder = os.path.join(workspace_dir, "workspace")
@@ -218,16 +229,33 @@ class AmazonScraper:
     def extract_process(
         self,
         output: str = 'final_output.csv',
-        price_symbol: str = '$',
-        base_append: str = 'https://www.amazon.com/',
+        price_symbol: Optional[str] = None,
+        base_append: Optional[str] = None,
         keywords: List[str] = None,
         first_page_wait: int = 150,
         next_page_wait: int = 5,
         headless: bool = False,
-        cancel_check: Optional[Callable[[], bool]] = None
+        cancel_check: Optional[Callable[[], bool]] = None,
+        # NEW optional parameters – if provided, they override instance vars
+        marketplace: Optional[str] = None,
+        base_url: Optional[str] = None,
+        currency_code: Optional[str] = None,
+        currency_symbol: Optional[str] = None,
     ) -> str:
+        # Use provided values or fallback to instance variables
+        final_marketplace = marketplace if marketplace is not None else self.marketplace
+        final_base_url = base_url if base_url is not None else self.base_url
+        final_currency_code = currency_code if currency_code is not None else self.currency_code
+        final_currency_symbol = currency_symbol if currency_symbol is not None else self.currency_symbol
+
+        # Determine price_symbol and base_append: if not explicitly provided, use currency_symbol and base_url
+        final_price_symbol = price_symbol if price_symbol is not None else final_currency_symbol
+        final_base_append = base_append if base_append is not None else final_base_url
+
         logger.info("=" * 60)
         logger.info("STARTING COMBINED EXTRACT + PROCESS WORKFLOW")
+        logger.info(f"Marketplace: {final_marketplace}, Base URL: {final_base_url}")
+        logger.info(f"Currency: {final_currency_code} ({final_currency_symbol})")
         logger.info("=" * 60)
 
         temp_extract_file = self._temp_extract_file
@@ -242,8 +270,8 @@ class AmazonScraper:
         self.process(
             input_file=temp_extract_file,
             output_file=output,
-            price_symbol=price_symbol,
-            base_append=base_append,
+            price_symbol=final_price_symbol,
+            base_append=final_base_append,
             keywords=keywords
         )
 

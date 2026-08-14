@@ -3,7 +3,7 @@
 import json
 import threading
 from typing import Optional
-from utils.logger import logger   # <-- add this import
+from utils.logger import logger
 
 
 class ProgressReporter:
@@ -12,7 +12,7 @@ class ProgressReporter:
     def __init__(self, total: int = 0):
         self._total = total
         self._processed = 0
-        self._lock = threading.Lock()
+        self._lock = threading.RLock()
         self._cancelled = False
 
     def set_total(self, total: int) -> None:
@@ -20,19 +20,32 @@ class ProgressReporter:
             self._total = total
 
     def increment(self, n: int = 1) -> int:
-        logger.info(f"[progress] increment: acquiring lock")
+        """Increment processed count by n. Returns new processed count."""
+        logger.info("[progress] increment: acquiring lock")
         with self._lock:
-            logger.info(f"[progress] increment: lock acquired")
+            logger.info("[progress] increment: lock acquired")
             self._processed += n
-            logger.info(f"[progress] increment: about to emit progress")
-            self._emit_progress()
-            logger.info(f"[progress] increment: progress emitted")
-            return self._processed
+            processed = self._processed
+            total = self._total
+        logger.info("[progress] increment: lock released")
+
+        # Emit AFTER releasing the lock to avoid deadlock.
+        self._emit_progress(processed, total)
+
+        logger.info("[progress] increment: progress emitted")
+        return processed
 
     def set_processed(self, value: int) -> None:
+        """Set processed count to a specific value."""
+        logger.info("[progress] set_processed: acquiring lock")
         with self._lock:
             self._processed = value
-            self._emit_progress()
+            processed = self._processed
+            total = self._total
+        logger.info("[progress] set_processed: lock released")
+
+        # Emit AFTER releasing the lock.
+        self._emit_progress(processed, total)
 
     @property
     def total(self) -> int:
@@ -44,23 +57,20 @@ class ProgressReporter:
         with self._lock:
             return self._processed
 
-    @property
-    def progress_percentage(self) -> float:
-        with self._lock:
-            if self._total == 0:
-                return 0.0
-            return (self._processed / self._total) * 100
+    def _emit_progress(self, processed: int, total: int) -> None:
+        """Emit progress JSON to stdout. Does NOT acquire the lock."""
+        percentage = round((processed / total) * 100, 1) if total else 0.0
 
-    def _emit_progress(self) -> None:
         data = {
             "event": "progress",
-            "processed": self._processed,
-            "total": self._total,
-            "percentage": round(self.progress_percentage, 1),
+            "processed": processed,
+            "total": total,
+            "percentage": percentage,
         }
+
         logger.info(f"[progress] emitting JSON: {data}")
         print(json.dumps(data), flush=True)
-        logger.info(f"[progress] JSON emitted")
+        logger.info("[progress] JSON emitted")
 
     def emit_started(self) -> None:
         """Emit a started event with the correct total."""
@@ -70,23 +80,27 @@ class ProgressReporter:
                 "processed": 0,
                 "total": self._total,
             }
-            print(json.dumps(data), flush=True)
+        print(json.dumps(data), flush=True)
 
     def emit_completed(self) -> None:
-        data = {
-            "event": "completed",
-            "processed": self._processed,
-            "total": self._total,
-        }
+        """Emit a completed event."""
+        with self._lock:
+            data = {
+                "event": "completed",
+                "processed": self._processed,
+                "total": self._total,
+            }
         print(json.dumps(data), flush=True)
 
     def emit_failed(self, error: str) -> None:
-        data = {
-            "event": "failed",
-            "error": error,
-            "processed": self._processed,
-            "total": self._total,
-        }
+        """Emit a failed event."""
+        with self._lock:
+            data = {
+                "event": "failed",
+                "error": error,
+                "processed": self._processed,
+                "total": self._total,
+            }
         print(json.dumps(data), flush=True)
 
     def mark_cancelled(self) -> None:

@@ -40,11 +40,56 @@ type Errors = Partial<
 const defaultOutputName = (sourceName: string) =>
   `${sourceName.replace(/\.csv$/i, "")}_scraped.csv`;
 
+const API_BASE =
+  typeof window !== "undefined" && window.location.hostname === "127.0.0.1"
+    ? "http://127.0.0.1:8000"
+    : "http://localhost:8000";
+
+// ---- FALLBACK marketplaces (used if backend is not ready) ----
+const FALLBACK_MARKETPLACES: Record<string, any> = {
+  US: { label: "United States", domain: "amazon.com", currency_code: "USD", currency_symbol: "$" },
+  UK: { label: "United Kingdom", domain: "amazon.co.uk", currency_code: "GBP", currency_symbol: "£" },
+  DE: { label: "Germany", domain: "amazon.de", currency_code: "EUR", currency_symbol: "€" },
+  FR: { label: "France", domain: "amazon.fr", currency_code: "EUR", currency_symbol: "€" },
+  IT: { label: "Italy", domain: "amazon.it", currency_code: "EUR", currency_symbol: "€" },
+  ES: { label: "Spain", domain: "amazon.es", currency_code: "EUR", currency_symbol: "€" },
+  NL: { label: "Netherlands", domain: "amazon.nl", currency_code: "EUR", currency_symbol: "€" },
+  PL: { label: "Poland", domain: "amazon.pl", currency_code: "PLN", currency_symbol: "zł" },
+  SE: { label: "Sweden", domain: "amazon.se", currency_code: "SEK", currency_symbol: "kr" },
+  BE: { label: "Belgium", domain: "amazon.com.be", currency_code: "EUR", currency_symbol: "€" },
+  IE: { label: "Ireland", domain: "amazon.ie", currency_code: "EUR", currency_symbol: "€" },
+  TR: { label: "Turkey", domain: "amazon.com.tr", currency_code: "TRY", currency_symbol: "₺" },
+  JP: { label: "Japan", domain: "amazon.co.jp", currency_code: "JPY", currency_symbol: "¥" },
+  IN: { label: "India", domain: "amazon.in", currency_code: "INR", currency_symbol: "₹" },
+  SG: { label: "Singapore", domain: "amazon.sg", currency_code: "SGD", currency_symbol: "S$" },
+  AU: { label: "Australia", domain: "amazon.com.au", currency_code: "AUD", currency_symbol: "A$" },
+  AE: { label: "UAE", domain: "amazon.ae", currency_code: "AED", currency_symbol: "د.إ" },
+  SA: { label: "Saudi Arabia", domain: "amazon.sa", currency_code: "SAR", currency_symbol: "﷼" },
+  EG: { label: "Egypt", domain: "amazon.eg", currency_code: "EGP", currency_symbol: "E£" },
+  MX: { label: "Mexico", domain: "amazon.com.mx", currency_code: "MXN", currency_symbol: "Mex$" },
+  BR: { label: "Brazil", domain: "amazon.com.br", currency_code: "BRL", currency_symbol: "R$" },
+  CA: { label: "Canada", domain: "amazon.ca", currency_code: "CAD", currency_symbol: "C$" },
+  ALL_EUROPE: {
+    label: "All Europe",
+    domain: "auto",
+    currency_code: "AUTO",
+    currency_symbol: "AUTO",
+    is_europe_union: true,
+  },
+};
+
 function ScrapeNew() {
   const { files, job, backendOnline, startJob, cancelJob } = useScrape();
 
-  const [fileInfo, setFileInfo] = useState<{ name: string; rows: number; raw: File } | null>(null);
+  // ---- Marketplace state ----
+  const [marketplaces, setMarketplaces] = useState<Record<string, any>>({});
+  const [loadingMarketplaces, setLoadingMarketplaces] = useState(true);
+  const [marketplace, setMarketplace] = useState("US");
+  const [currencyCode, setCurrencyCode] = useState("USD");
+  const [currencySymbol, setCurrencySymbol] = useState("$");
 
+  // ---- File & form state ----
+  const [fileInfo, setFileInfo] = useState<{ name: string; rows: number; raw: File } | null>(null);
   const [column, setColumn] = useState("Links");
   const [threads, setThreads] = useState("3");
   const [gap, setGap] = useState("300");
@@ -61,6 +106,56 @@ function ScrapeNew() {
   const processing = job.status === "processing" || job.status === "cancelling";
   const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
   const isCancelling = job.status === "cancelling";
+
+  // ---- Fetch marketplace config (with fallback) ----
+  useEffect(() => {
+    const fetchMarketplaces = async () => {
+      try {
+        const res = await fetch(`${API_BASE}/api/marketplaces`);
+        if (res.ok) {
+          const data = await res.json();
+          setMarketplaces(data);
+          if (data.US) {
+            setCurrencyCode(data.US.currency_code);
+            setCurrencySymbol(data.US.currency_symbol);
+          }
+        } else {
+          console.warn("Backend /api/marketplaces failed, using fallback");
+          setMarketplaces(FALLBACK_MARKETPLACES);
+          if (FALLBACK_MARKETPLACES.US) {
+            setCurrencyCode(FALLBACK_MARKETPLACES.US.currency_code);
+            setCurrencySymbol(FALLBACK_MARKETPLACES.US.currency_symbol);
+          }
+        }
+      } catch (err) {
+        console.error("Error fetching marketplaces, using fallback:", err);
+        setMarketplaces(FALLBACK_MARKETPLACES);
+        if (FALLBACK_MARKETPLACES.US) {
+          setCurrencyCode(FALLBACK_MARKETPLACES.US.currency_code);
+          setCurrencySymbol(FALLBACK_MARKETPLACES.US.currency_symbol);
+        }
+      } finally {
+        setLoadingMarketplaces(false);
+      }
+    };
+    fetchMarketplaces();
+  }, []);
+
+  // ---- Handle marketplace change ----
+  const handleMarketplaceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
+    const id = e.target.value;
+    setMarketplace(id);
+    const config = marketplaces[id];
+    if (config) {
+      if (id === "ALL_EUROPE") {
+        setCurrencyCode("AUTO");
+        setCurrencySymbol("AUTO");
+      } else {
+        setCurrencyCode(config.currency_code);
+        setCurrencySymbol(config.currency_symbol);
+      }
+    }
+  };
 
   // ---- Output name auto-generation and uniqueness ----
   const getUniqueOutputName = (baseName: string): string => {
@@ -84,9 +179,6 @@ function ScrapeNew() {
       setOutputName(unique);
     }
   }, [fileInfo, outputTouched, files]);
-
-  const isValidOutputName = (name: string): boolean =>
-    name.trim().length > 0 && name.trim().toLowerCase().endsWith(".csv");
 
   const acceptFile = (f: File) => {
     if (!/\.csv$/i.test(f.name)) {
@@ -187,6 +279,9 @@ function ScrapeNew() {
         firstPageWait: firstPageWait.trim() ? Number(firstPageWait) : undefined,
         nextPageWait: nextPageWait.trim() ? Number(nextPageWait) : undefined,
         keywords: keywordArray,
+        marketplace,
+        currencyCode,
+        currencySymbol,
       });
       toast.success("Scraping job submitted");
     } catch (err: any) {
@@ -306,6 +401,7 @@ function ScrapeNew() {
 
         {/* Fields */}
         <div className="mt-6 grid gap-5">
+          {/* Column Name */}
           <Field label="Column Name" hint="Header holding the product URLs" error={errors.column}>
             <input
               value={column}
@@ -319,6 +415,49 @@ function ScrapeNew() {
             />
           </Field>
 
+          {/* ---- Marketplace and Currency (fixed layout) ---- */}
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
+                Amazon Marketplace
+              </label>
+              <select
+                value={marketplace}
+                onChange={handleMarketplaceChange}
+                disabled={processing || loadingMarketplaces}
+                className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+              >
+                {Object.entries(marketplaces).map(([id, config]) => (
+                  <option key={id} value={id}>
+                    {config.label} ({config.domain})
+                  </option>
+                ))}
+              </select>
+              <p className="mt-1 text-xs text-muted-foreground">Select the target region</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
+                Currency
+              </label>
+              <div className="flex items-center gap-2 rounded-lg border-2 bg-muted/40 px-3 py-2 text-sm font-medium h-[42px]">
+                <span className="text-lg">{currencySymbol}</span>
+                <span>{currencyCode}</span>
+                {marketplace === "ALL_EUROPE" && (
+                  <span className="ml-auto text-xs text-muted-foreground">
+                    ⓘ Auto-detected
+                  </span>
+                )}
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {marketplace === "ALL_EUROPE"
+                  ? "Currency is detected from each Amazon URL."
+                  : "Currency is automatically set for this marketplace."}
+              </p>
+            </div>
+          </div>
+
+          {/* Threads */}
           <Field label="Threads" hint="Parallel workers (1–4)" error={errors.threads}>
             <div className="flex items-center gap-3">
               <input
@@ -347,6 +486,7 @@ function ScrapeNew() {
             </div>
           </Field>
 
+          {/* Batch Gap */}
           <Field label="Batch Gap" hint="Seconds to wait between batches" error={errors.gap}>
             <div className="flex items-center gap-2">
               <input
@@ -361,6 +501,7 @@ function ScrapeNew() {
             </div>
           </Field>
 
+          {/* First Page Wait */}
           <Field
             label="First Page Wait"
             hint="Minutes (1–5) – optional"
@@ -380,6 +521,7 @@ function ScrapeNew() {
             </div>
           </Field>
 
+          {/* Next Page Wait */}
           <Field
             label="Next Page Wait"
             hint="Seconds (3–60) – optional"
@@ -399,6 +541,7 @@ function ScrapeNew() {
             </div>
           </Field>
 
+          {/* Keywords */}
           <Field
             label="Keywords"
             hint="Comma-separated, max 10 – optional"
@@ -413,7 +556,7 @@ function ScrapeNew() {
             />
           </Field>
 
-          {/* OUTPUT FILE NAME FIELD */}
+          {/* Output File Name */}
           <Field
             label="Output File Name"
             hint="Name of the scraped CSV file"
@@ -551,6 +694,8 @@ function ScrapeNew() {
     </main>
   );
 }
+
+// ---- Helper components ----
 
 function Field({
   label,

@@ -19,6 +19,14 @@ _running_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
 
 
+def _get_base_url(marketplace: str) -> str:
+    """Get base URL from marketplace config."""
+    from application.marketplace_config import get_marketplace
+    config = get_marketplace(marketplace)
+    if config:
+        return config.get("base_url", "https://www.amazon.com/")
+    return "https://www.amazon.com/"
+
 # ---------------------------------------------------------------------------
 # Public entrypoint
 # ---------------------------------------------------------------------------
@@ -33,6 +41,10 @@ def start_job(
     output_filename: str,
     keywords: Optional[list[str]] = None,
     headless: bool = True,
+    # NEW marketplace params
+    marketplace: str = "US",
+    currency_code: str = "USD",
+    currency_symbol: str = "$",
 ) -> None:
     """Prepare the job workspace and launch the scraper in a background thread."""
     job_dir = config.JOBS_DIR / job_id
@@ -58,20 +70,15 @@ def start_job(
     bg = threading.Thread(
         target=_run_engine,
         args=(
-            job_id,
-            job_dir,
-            input_csv_path,
-            output_csv_path,
-            threads,
-            first_page_wait,
-            next_page_wait,
-            keywords or [],
-            headless,
+            job_id, job_dir, input_csv_path, output_csv_path,
+            threads, first_page_wait, next_page_wait, keywords or [], headless,
+            marketplace, currency_code, currency_symbol,  # <-- NEW
         ),
         daemon=True,
         name=f"scraper-{job_id[:8]}",
     )
     bg.start()
+    
 
 
 # ---------------------------------------------------------------------------
@@ -125,15 +132,15 @@ def _run_engine(
     next_page_wait: int,
     keywords: list[str],
     headless: bool,
+    marketplace: str,       # <-- NEW
+    currency_code: str,     # <-- NEW
+    currency_symbol: str,   # <-- NEW
 ) -> None:
     """Run the ScraperEngine subprocess and update job status."""
     job_service.mark_running(job_id)
 
     cmd = [
-        config.UV_EXECUTABLE,
-        "run",
-        "python",
-        str(config.ENGINE_RUNNER),
+        config.UV_EXECUTABLE, "run", "python", str(config.ENGINE_RUNNER),
         "--job-id", job_id,
         "--job-dir", str(job_dir),
         "--input-csv", str(input_csv_path),
@@ -141,6 +148,11 @@ def _run_engine(
         "--threads", str(threads),
         "--first-page-wait", str(first_page_wait),
         "--next-page-wait", str(next_page_wait),
+        # NEW CLI args for marketplace
+        "--marketplace", marketplace,
+        "--base-url", _get_base_url(marketplace),  # Helper function
+        "--currency-code", currency_code,
+        "--currency-symbol", currency_symbol,
     ]
     if keywords:
         cmd += ["--keywords", ",".join(keywords)]

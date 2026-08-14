@@ -1,96 +1,94 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
-application_runner.py — CLI entry point for the ScraperEngine.
+Application runner for the Amazon Scraper.
+Called by the backend to start a scraping job.
 """
 
 import argparse
+import csv
 import json
-import os
 import sys
-import time
 from pathlib import Path
 
-# Add src to path so we can import amazon_scraper
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add parent directory to path so we can import from the engine
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from amazon_scraper import AmazonScraper  # type: ignore
+from amazon_scraper import AmazonScraper
 
 
-def emit(event: str, **kwargs) -> None:
-    """Emit a structured JSON event to stdout."""
-    data = {"event": event, **kwargs}
-    print(json.dumps(data), flush=True)
+def parse_keywords(keywords_str: str) -> list[str]:
+    """Parse comma-separated keywords into a list."""
+    if not keywords_str:
+        return []
+    return [k.strip() for k in keywords_str.split(",") if k.strip()]
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Amazon Scraper Engine Runner")
-    parser.add_argument("--job-id", required=True, help="Unique job identifier")
-    parser.add_argument("--job-dir", required=True, help="Job directory path")
-    parser.add_argument("--input-csv", required=True, help="Path to input CSV")
-    parser.add_argument("--output-csv", required=True, help="Path to output CSV")
+    parser = argparse.ArgumentParser(description="Run Amazon scraper job")
+    parser.add_argument("--job-id", required=True, help="Job ID")
+    parser.add_argument("--job-dir", required=True, help="Job directory")
+    parser.add_argument("--input-csv", required=True, help="Input CSV file path")
+    parser.add_argument("--output-csv", required=True, help="Output CSV file path")
     parser.add_argument("--threads", type=int, default=3, help="Number of threads")
-    parser.add_argument("--first-page-wait", type=int, default=150, help="First page wait in seconds")
-    parser.add_argument("--next-page-wait", type=int, default=5, help="Next page wait in seconds")
-    parser.add_argument("--keywords", type=str, default="", help="Comma-separated keywords")
+    parser.add_argument("--first-page-wait", type=int, default=10, help="First page wait in seconds")
+    parser.add_argument("--next-page-wait", type=int, default=3, help="Next page wait in seconds")
+    parser.add_argument("--keywords", default="", help="Comma-separated keywords")
     parser.add_argument("--headless", action="store_true", help="Run in headless mode")
+
+    # NEW marketplace arguments
+    parser.add_argument("--marketplace", required=True, help="Marketplace identifier (e.g., US, UK)")
+    parser.add_argument("--base-url", required=True, help="Base URL for the marketplace")
+    parser.add_argument("--currency-code", required=True, help="Currency code (e.g., USD)")
+    parser.add_argument("--currency-symbol", required=True, help="Currency symbol (e.g., $)")
 
     args = parser.parse_args()
 
-    print(f"[runner] Job ID: {args.job_id}", flush=True)
-    print(f"[runner] Headless: {args.headless}", flush=True)
-    print(f"[runner] Input: {args.input_csv}", flush=True)
-    print(f"[runner] Output: {args.output_csv}", flush=True)
-    print(f"[runner] Threads: {args.threads}", flush=True)
+    # Ensure job directory exists
+    job_dir = Path(args.job_dir)
+    job_dir.mkdir(parents=True, exist_ok=True)
 
-    keywords = [k.strip() for k in args.keywords.split(",") if k.strip()] if args.keywords else []
+    # Read URLs from input CSV (first column)
+    urls = []
+    with open(args.input_csv, newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        if reader.fieldnames:
+            url_col = reader.fieldnames[0]
+            for row in reader:
+                url = row.get(url_col, "").strip()
+                if url:
+                    urls.append(url)
 
-    # Cancellation flag file
-    cancel_file = Path(args.job_dir) / ".cancel"
-    cancel_file.parent.mkdir(parents=True, exist_ok=True)
+    if not urls:
+        print(json.dumps({"event": "failed", "error": "No URLs found in input CSV"}))
+        sys.exit(1)
 
-    def is_cancelled() -> bool:
-        return cancel_file.exists()
+    keywords = parse_keywords(args.keywords)
 
+    # Instantiate scraper with all parameters
+    scraper = AmazonScraper(
+        listings=urls,                           # was 'urls' → fixed to 'listings'
+        max_threads=args.threads,                # was 'threads' → fixed to 'max_threads'
+        workspace_dir=args.job_dir,              # job_dir → workspace_dir
+        marketplace=args.marketplace,
+        base_url=args.base_url,
+        currency_code=args.currency_code,
+        currency_symbol=args.currency_symbol,
+    )
+
+    # Run the extraction and processing pipeline
     try:
-        # Use Selenium Manager — no hardcoded chromedriver.exe
-        scraper = AmazonScraper(
-            listings=args.input_csv,
-            max_threads=args.threads,
-            webdriver_file=None,          # Use Selenium Manager
-            workspace_dir=args.job_dir,
-        )
-
-        # Run extraction + processing
         scraper.extract_process(
             output=args.output_csv,
-            price_symbol="$",
-            base_append="https://www.amazon.com/",
             keywords=keywords,
             first_page_wait=args.first_page_wait,
             next_page_wait=args.next_page_wait,
             headless=args.headless,
-            cancel_check=is_cancelled,
+            # Optionally override price_symbol and base_append if needed:
+            # price_symbol=args.currency_symbol,
+            # base_append=args.base_url,
         )
-
-        if is_cancelled():
-            emit("cancelled", processed=0, total=0)
-            sys.exit(0)
-
-        # Count output rows
-        try:
-            import csv
-            with open(args.output_csv, "r", encoding="utf-8") as f:
-                reader = csv.reader(f)
-                rows = sum(1 for _ in reader) - 1
-                emit("completed", processed=rows, total=rows)
-        except Exception:
-            emit("completed", processed=0, total=0)
-
-        sys.exit(0)
-
-    except Exception as exc:
-        emit("failed", error=str(exc))
-        print(f"[runner] Error: {exc}", flush=True)
+    except Exception as e:
+        print(json.dumps({"event": "failed", "error": str(e)}))
         sys.exit(1)
 
 
