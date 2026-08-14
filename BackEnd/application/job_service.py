@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Optional
 from application.database import get_connection
-
+from application import job_service
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -78,3 +78,28 @@ def mark_cancelled(job_id: str, processed_rows: int = 0) -> Optional[dict]:
 
 def update_progress(job_id: str, processed_rows: int) -> Optional[dict]:
     return update_job(job_id, processed_rows=processed_rows)
+
+def create_job(
+    total_rows: int = 0,
+    marketplace: Optional[str] = None,
+    domain: Optional[str] = None,
+    currency_code: Optional[str] = None,
+    currency_symbol: Optional[str] = None,
+    requested_rows: int = 0,
+) -> dict:
+    job_id = str(uuid.uuid4())
+    now = _now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """INSERT INTO jobs 
+               (id, status, created_at, total_rows, marketplace, domain, currency_code, 
+                currency_symbol, requested_rows, quota_used) 
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)""",
+            (job_id, "created", now, total_rows, marketplace, domain, 
+             currency_code, currency_symbol, requested_rows),
+        )
+        conn.commit()
+    return get_job(job_id)
+
+def update_quota_used(job_id: str, quota_used: int) -> Optional[dict]:
+    return update_job(job_id, quota_used=quota_used)

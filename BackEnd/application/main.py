@@ -16,6 +16,8 @@ from application.config import CORS_ORIGINS
 from application.routes_health import router as health_router
 from application.routes_jobs import router as jobs_router
 from application.routes_files import router as files_router
+from application.routes_quota import router as quota_router
+from application.routes_marketplaces import router as marketplaces_router  # <-- ADDED
 
 
 # ---------------------------------------------------------------------------
@@ -57,3 +59,5 @@ app.add_middleware(
 app.include_router(health_router)
 app.include_router(jobs_router)
 app.include_router(files_router)
+app.include_router(quota_router)
+app.include_router(marketplaces_router)   # <-- ADDED

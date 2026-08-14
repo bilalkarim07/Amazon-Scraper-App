@@ -79,7 +79,7 @@ const FALLBACK_MARKETPLACES: Record<string, any> = {
 };
 
 function ScrapeNew() {
-  const { files, job, backendOnline, startJob, cancelJob } = useScrape();
+  const { files, job, backendOnline, startJob, cancelJob, quota, refreshQuota } = useScrape();
 
   // ---- Marketplace state ----
   const [marketplaces, setMarketplaces] = useState<Record<string, any>>({});
@@ -194,6 +194,10 @@ function ScrapeNew() {
       setFileInfo({ name: f.name, rows, raw: f });
       setErrors((e) => ({ ...e, file: undefined }));
       toast.success(`${f.name} loaded — ${rows} rows`);
+      // If quota is available and rows exceed remaining, show warning
+      if (quota && rows > quota.remaining) {
+        toast.warning(`This file has ${rows} rows, but only ${quota.remaining} quota rows remaining.`);
+      }
     };
     reader.readAsText(f);
   };
@@ -250,6 +254,11 @@ function ScrapeNew() {
       }
     }
 
+    // ---- Quota check (client-side) ----
+    if (quota && fileInfo && fileInfo.rows > quota.remaining) {
+      next.file = `File has ${fileInfo.rows} rows, but only ${quota.remaining} quota rows remaining.`;
+    }
+
     setErrors(next);
     return Object.keys(next).length === 0;
   };
@@ -261,6 +270,12 @@ function ScrapeNew() {
     }
     if (!backendOnline) {
       toast.error("Backend is offline. Start the Python server first.");
+      return;
+    }
+
+    // Check quota one more time
+    if (quota && fileInfo && fileInfo.rows > quota.remaining) {
+      toast.error(`Quota exceeded. You have ${quota.remaining} rows remaining, but the file has ${fileInfo.rows} rows.`);
       return;
     }
 
@@ -306,6 +321,9 @@ function ScrapeNew() {
 
   const threadDots = useMemo(() => [1, 2, 3, 4], []);
 
+  // Determine if Start button should be disabled
+  const isStartDisabled = !backendOnline || processing || (quota && quota.remaining <= 0) || (fileInfo && quota && fileInfo.rows > quota.remaining);
+
   return (
     <main className="mx-auto w-full max-w-3xl px-5 py-10 md:py-16">
       <h1 className="title-pop text-3xl md:text-5xl">Scrape Amazon Product Listings</h1>
@@ -330,6 +348,54 @@ function ScrapeNew() {
           ? "Backend online — ready to scrape"
           : "Backend offline — start the Python server on port 8000"}
       </div>
+
+      {/* ---- QUOTA DISPLAY ---- */}
+      {quota && (
+        <div className="mt-4 rounded-lg border-2 bg-muted/20 p-4">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Daily Scraping Quota
+              </p>
+              <p className="text-sm font-medium">
+                {quota.used.toLocaleString()} / {quota.limit.toLocaleString()} used
+              </p>
+              <p className="text-xs text-muted-foreground">
+                {quota.remaining.toLocaleString()} remaining
+              </p>
+            </div>
+            <div className="text-right">
+              <p className="text-xs text-muted-foreground">
+                {new Date(quota.date).toLocaleDateString()}
+              </p>
+              <button
+                onClick={refreshQuota}
+                className="text-xs text-muted-foreground hover:text-foreground"
+              >
+                ↻ Refresh
+              </button>
+            </div>
+          </div>
+          <div className="mt-2 h-2 overflow-hidden rounded-full bg-muted">
+            <div
+              className="h-full rounded-full bg-primary transition-all duration-300"
+              style={{
+                width: `${Math.min((quota.used / quota.limit) * 100, 100)}%`,
+              }}
+            />
+          </div>
+          {quota.remaining === 0 && (
+            <p className="mt-2 text-xs font-semibold text-destructive">
+              ⚠️ Daily quota exhausted. Please try again tomorrow.
+            </p>
+          )}
+          {fileInfo && quota.remaining > 0 && fileInfo.rows > quota.remaining && (
+            <p className="mt-2 text-xs font-semibold text-destructive">
+              ⚠️ This file has {fileInfo.rows} rows, but only {quota.remaining} quota rows remaining. Please reduce the file or wait for quota reset.
+            </p>
+          )}
+        </div>
+      )}
 
       <section className="card-hard mt-6 p-5 md:p-7">
         {/* Dropzone */}
@@ -596,10 +662,15 @@ function ScrapeNew() {
           {job.status === "idle" && (
             <button
               onClick={onStart}
-              disabled={!backendOnline}
+              disabled={isStartDisabled}
               className="mx-auto flex items-center gap-2 rounded-full border-2 bg-primary px-10 py-3 font-display text-lg font-bold shadow-[4px_4px_0_0_var(--ink)] press disabled:opacity-50"
             >
-              <Play className="h-4 w-4" /> Start
+              <Play className="h-4 w-4" />
+              {quota && quota.remaining <= 0
+                ? "Quota Exhausted"
+                : fileInfo && quota && fileInfo.rows > quota.remaining
+                ? "Exceeds Quota"
+                : "Start"}
             </button>
           )}
 

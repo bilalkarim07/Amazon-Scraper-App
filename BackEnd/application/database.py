@@ -1,5 +1,4 @@
 """ database.py — SQLite setup. """
-
 import sqlite3
 from contextlib import contextmanager
 from application.config import DB_PATH
@@ -16,11 +15,23 @@ CREATE TABLE IF NOT EXISTS jobs (
     output_file TEXT,
     total_rows INTEGER DEFAULT 0,
     processed_rows INTEGER DEFAULT 0,
-    error TEXT
+    error TEXT,
     marketplace TEXT,
     domain TEXT,
     currency_code TEXT,
-    currency_symbol TEXT
+    currency_symbol TEXT,
+    requested_rows INTEGER DEFAULT 0,
+    quota_used INTEGER DEFAULT 0
+);
+"""
+
+_CREATE_QUOTA_TABLE = """
+CREATE TABLE IF NOT EXISTS quota (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    daily_limit INTEGER NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    quota_date TEXT NOT NULL,
+    last_updated TEXT DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -28,23 +39,23 @@ def init_db() -> None:
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with get_connection() as conn:
         conn.execute(_CREATE_JOBS_TABLE)
-        # Add new columns if they don't exist (SQLite doesn't support IF NOT EXISTS for columns)
-        try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN marketplace TEXT")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
-        try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN domain TEXT")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN currency_code TEXT")
-        except sqlite3.OperationalError:
-            pass
-        try:
-            conn.execute("ALTER TABLE jobs ADD COLUMN currency_symbol TEXT")
-        except sqlite3.OperationalError:
-            pass
+        conn.execute(_CREATE_QUOTA_TABLE)
+        
+        # Add new columns to jobs if they don't exist
+        for col in ["requested_rows", "quota_used"]:
+            try:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                pass
+        
+        # Initialize quota if not exists
+        from application.config import DAILY_QUOTA_LIMIT
+        from datetime import date
+        today = date.today().isoformat()
+        conn.execute("""
+            INSERT OR IGNORE INTO quota (id, daily_limit, used, quota_date)
+            VALUES (1, ?, 0, ?)
+        """, (DAILY_QUOTA_LIMIT, today))
         conn.commit()
 
 @contextmanager

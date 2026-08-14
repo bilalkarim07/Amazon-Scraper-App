@@ -5,9 +5,12 @@ from typing import Annotated, Optional
 import csv
 import io
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File, status
-from application import job_service, scraper_service
-from application.models import JobCreateResponse, JobStatusResponse, CancelResponse
-from application.config import DEFAULT_FIRST_PAGE_WAIT, DEFAULT_NEXT_PAGE_WAIT, HEADLESS_MODE
+from application import quota_service
+from application import job_service          # <-- ADDED
+from application import scraper_service     # <-- ADDED
+from application import marketplace_config  # <-- ADDED for validation
+from application.models import JobCreateResponse, JobStatusResponse, CancelResponse, QuotaResponse
+from application.config import DEFAULT_FIRST_PAGE_WAIT, DEFAULT_NEXT_PAGE_WAIT, HEADLESS_MODE, DAILY_QUOTA_LIMIT
 
 router = APIRouter()
 
@@ -31,7 +34,11 @@ async def create_job(
     next_page_wait: Annotated[int, Form(ge=1, description="Seconds to wait for subsequent pages")] = DEFAULT_NEXT_PAGE_WAIT,
     output_filename: Annotated[str, Form(description="Output CSV filename")] = "output.csv",
     keywords: Annotated[str, Form(description="Comma-separated keywords")] = "",
-    headless: Annotated[bool, Form(description="Run Chrome headless")] = HEADLESS_MODE,  # Now uses env var
+    headless: Annotated[bool, Form(description="Run Chrome headless")] = HEADLESS_MODE,
+    # NEW marketplace fields
+    marketplace: Annotated[str, Form(description="Marketplace identifier")] = "US",
+    currency_code: Annotated[str, Form(description="Currency code")] = "USD",
+    currency_symbol: Annotated[str, Form(description="Currency symbol")] = "$",
 ) -> JobCreateResponse:
     # --- Validate file type ---
     if not (file.filename or "").lower().endswith(".csv"):
@@ -79,6 +86,47 @@ async def create_job(
 
     column = matched_column
 
+    # --- Get total rows from CSV ---
+    try:
+        lines = [line for line in text.splitlines() if line.strip()]
+        total_rows = max(0, len(lines) - 1)  # Subtract header row
+    except Exception:
+        total_rows = 0
+
+    # --- Validate marketplace ---
+    if not marketplace_config.validate_marketplace(marketplace):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid marketplace: {marketplace}",
+        )
+
+    marketplace_config_obj = marketplace_config.get_marketplace(marketplace)
+
+    # For ALL_EUROPE, currency is auto-detected, but we keep the provided values as they are.
+    if marketplace == "ALL_EUROPE":
+        currency_code = "AUTO"
+        currency_symbol = "AUTO"
+
+    # --- CHECK QUOTA BEFORE STARTING ---
+    if total_rows > 0:
+        success, error_msg = quota_service.reserve_quota(total_rows)
+        if not success:
+            quota = quota_service.get_quota()
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "error": "QUOTA_EXCEEDED",
+                    "message": error_msg,
+                    "daily_limit": quota["daily_limit"],
+                    "used": quota["used"],
+                    "remaining": quota["remaining"],
+                    "requested": total_rows,
+                },
+            )
+    else:
+        # No rows, reserve 0 (should not happen, but safe)
+        quota_service.reserve_quota(0)
+
     # --- Validate / sanitise output filename ---
     output_filename = output_filename.strip()
     if not output_filename:
@@ -89,8 +137,15 @@ async def create_job(
     # --- Parse keywords ---
     keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else []
 
-    # --- Create the job record ---
-    job = job_service.create_job(total_rows=0)
+    # --- Create the job record with all fields ---
+    job = job_service.create_job(
+        total_rows=total_rows,
+        marketplace=marketplace,
+        domain=marketplace_config_obj.get("domain") if marketplace_config_obj else None,
+        currency_code=currency_code,
+        currency_symbol=currency_symbol,
+        requested_rows=total_rows,
+    )
     job_id = job["id"]
 
     # --- Kick off the scraper in the background ---
@@ -104,6 +159,9 @@ async def create_job(
         output_filename=output_filename,
         keywords=keyword_list,
         headless=headless,
+        marketplace=marketplace,
+        currency_code=currency_code,
+        currency_symbol=currency_symbol,
     )
 
     return JobCreateResponse(job_id=job_id, status="created")

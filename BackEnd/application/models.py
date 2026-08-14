@@ -13,7 +13,7 @@ class JobCreateResponse(BaseModel):
 
 class JobStatusResponse(BaseModel):
     id: str
-    status: str  # created | running | cancelling | cancelled | completed | failed
+    status: str
     created_at: str
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -22,7 +22,20 @@ class JobStatusResponse(BaseModel):
     processed_rows: int = 0
     output_file: Optional[str] = None
     error: Optional[str] = None
+    # NEW fields
+    marketplace: Optional[str] = None
+    domain: Optional[str] = None
+    currency_code: Optional[str] = None
+    currency_symbol: Optional[str] = None
+    requested_rows: int = 0
+    quota_used: int = 0
 
 class CancelResponse(BaseModel):
     job_id: str
     status: str  # cancelling
+
+class QuotaResponse(BaseModel):
+    limit: int
+    used: int
+    remaining: int
+    date: str

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from application import config
 from application import job_service
+from application import quota_service   # NEW: import quota service
 
 # --- Global registry of running subprocesses ---
 _running_processes: Dict[str, subprocess.Popen] = {}
@@ -26,6 +27,7 @@ def _get_base_url(marketplace: str) -> str:
     if config:
         return config.get("base_url", "https://www.amazon.com/")
     return "https://www.amazon.com/"
+
 
 # ---------------------------------------------------------------------------
 # Public entrypoint
@@ -72,13 +74,12 @@ def start_job(
         args=(
             job_id, job_dir, input_csv_path, output_csv_path,
             threads, first_page_wait, next_page_wait, keywords or [], headless,
-            marketplace, currency_code, currency_symbol,  # <-- NEW
+            marketplace, currency_code, currency_symbol,
         ),
         daemon=True,
         name=f"scraper-{job_id[:8]}",
     )
     bg.start()
-    
 
 
 # ---------------------------------------------------------------------------
@@ -132,11 +133,11 @@ def _run_engine(
     next_page_wait: int,
     keywords: list[str],
     headless: bool,
-    marketplace: str,       # <-- NEW
-    currency_code: str,     # <-- NEW
-    currency_symbol: str,   # <-- NEW
+    marketplace: str,
+    currency_code: str,
+    currency_symbol: str,
 ) -> None:
-    """Run the ScraperEngine subprocess and update job status."""
+    """Run the ScraperEngine subprocess and update job status, releasing quota."""
     job_service.mark_running(job_id)
 
     cmd = [
@@ -148,9 +149,8 @@ def _run_engine(
         "--threads", str(threads),
         "--first-page-wait", str(first_page_wait),
         "--next-page-wait", str(next_page_wait),
-        # NEW CLI args for marketplace
         "--marketplace", marketplace,
-        "--base-url", _get_base_url(marketplace),  # Helper function
+        "--base-url", _get_base_url(marketplace),
         "--currency-code", currency_code,
         "--currency-symbol", currency_symbol,
     ]
@@ -160,10 +160,11 @@ def _run_engine(
         cmd.append("--headless")
 
     log_path = job_dir / "runner.log"
+    processed_rows = 0
+    requested_rows = 0
 
     try:
         with open(log_path, "w", encoding="utf-8") as log_fh:
-            # --- Set unbuffered Python output to avoid pipe deadlock ---
             env = os.environ.copy()
             env["PYTHONUNBUFFERED"] = "1"
 
@@ -174,25 +175,21 @@ def _run_engine(
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                env=env,  # <-- critical fix
+                env=env,
             )
 
-            # Register process for cancellation
             with _process_lock:
                 _running_processes[job_id] = proc
 
-            # Read stdout line by line — parse JSON progress events
             try:
                 for line in iter(proc.stdout.readline, ""):
                     if not line:
                         break
-                    # Always write to runner.log
                     log_fh.write(line)
                     log_fh.flush()
 
                     logging.info(f"[parent] read line: {line.strip()}")
 
-                    # Try to parse as JSON progress event
                     line_stripped = line.strip()
                     if line_stripped.startswith("{") and line_stripped.endswith("}"):
                         try:
@@ -217,16 +214,32 @@ def _run_engine(
             finally:
                 proc.stdout.close()
 
-            # Wait for process to exit
             return_code = proc.wait()
 
-            # Unregister process
             with _process_lock:
                 _running_processes.pop(job_id, None)
 
-            # Final status update based on return code
-            if return_code == 0 and output_csv_path.is_file():
+            # --- Determine final processed rows ---
+            if output_csv_path.is_file():
                 processed_rows = _count_csv_rows(output_csv_path)
+            else:
+                processed_rows = 0
+
+            # --- Get requested rows from job record ---
+            job = job_service.get_job(job_id)
+            if job:
+                requested_rows = job.get("requested_rows", 0)
+            else:
+                requested_rows = 0
+
+            # --- Release any unused quota ---
+            if requested_rows > 0 and processed_rows < requested_rows:
+                unused = requested_rows - processed_rows
+                quota_service.release_quota(unused)
+                logging.info(f"Released {unused} unused quota rows for job {job_id}")
+
+            # --- Final status update ---
+            if return_code == 0 and output_csv_path.is_file():
                 job_service.mark_completed(
                     job_id,
                     output_file=str(output_csv_path),
@@ -235,7 +248,6 @@ def _run_engine(
             else:
                 job = job_service.get_job(job_id)
                 if job and job.get("status") == "cancelling":
-                    processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
                     job_service.mark_cancelled(job_id, processed_rows)
                 else:
                     error_snippet = _tail_log(log_path, lines=20)
@@ -247,6 +259,12 @@ def _run_engine(
     except Exception as exc:
         with _process_lock:
             _running_processes.pop(job_id, None)
+        # On exception, release all quota for this job
+        job = job_service.get_job(job_id)
+        if job:
+            requested = job.get("requested_rows", 0)
+            if requested > 0:
+                quota_service.release_quota(requested)
         job_service.mark_failed(job_id, str(exc))
 
 
@@ -290,6 +308,13 @@ def cancel_job(job_id: str) -> bool:
     processed_rows = 0
     if output_file and Path(output_file).is_file():
         processed_rows = _count_csv_rows(Path(output_file))
+
+    # Release unused quota if any (the job will be marked cancelled, and _run_engine will also release,
+    # but it might not run if cancellation happens before engine starts. So we handle here as well.)
+    requested = job.get("requested_rows", 0)
+    if requested > 0 and processed_rows < requested:
+        unused = requested - processed_rows
+        quota_service.release_quota(unused)
 
     job_service.mark_cancelled(job_id, processed_rows)
     return True

@@ -8,6 +8,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { toast } from "sonner"; // added import for toast
 
 const API_BASE =
   typeof window !== "undefined" && window.location.hostname === "127.0.0.1"
@@ -16,6 +17,8 @@ const API_BASE =
 
 // How often to poll GET /api/jobs/{id} while a job is running (ms)
 const POLL_INTERVAL_MS = 3000;
+// How often to refresh quota (ms)
+const QUOTA_REFRESH_INTERVAL_MS = 60000; // 1 minute
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,10 +43,19 @@ export type JobState = {
   error: string | null;
 };
 
+/** Quota status from the backend. */
+export type QuotaState = {
+  limit: number;
+  used: number;
+  remaining: number;
+  date: string;
+};
+
 type Ctx = {
   files: ScrapedFile[];
   job: JobState;
   backendOnline: boolean;
+  quota: QuotaState | null;
   startJob: (opts: {
     file: File;
     sourceName: string;
@@ -54,9 +66,13 @@ type Ctx = {
     firstPageWait?: number | undefined;
     nextPageWait?: number | undefined;
     keywords?: string[] | undefined;
+    marketplace: string;
+    currencyCode: string;
+    currencySymbol: string;
   }) => Promise<void>;
   cancelJob: () => Promise<void>;
   deleteFile: (id: string) => void;
+  refreshQuota: () => Promise<void>;
 };
 
 const ScrapeContext = createContext<Ctx | null>(null);
@@ -75,6 +91,9 @@ function buildFormData(opts: {
   nextPageWait: number;
   outputName: string;
   keywords: string[];
+  marketplace: string;
+  currencyCode: string;
+  currencySymbol: string;
 }): FormData {
   const fd = new FormData();
   fd.append("file", opts.file);
@@ -84,9 +103,11 @@ function buildFormData(opts: {
   fd.append("next_page_wait", String(opts.nextPageWait));
   fd.append("output_filename", opts.outputName);
   fd.append("keywords", opts.keywords.join(","));
+  // Append marketplace and currency fields
+  fd.append("marketplace", opts.marketplace);
+  fd.append("currency_code", opts.currencyCode);
+  fd.append("currency_symbol", opts.currencySymbol);
   // For development, we want headless=false; but we'll let the backend decide via env.
-  // We'll omit headless parameter so backend uses its default (HEADLESS_MODE).
-  // If you want to force it from frontend, you can uncomment and set false.
   // fd.append("headless", "false");
   return fd;
 }
@@ -107,6 +128,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     error: null,
   });
   const [backendOnline, setBackendOnline] = useState(false);
+  const [quota, setQuota] = useState<QuotaState | null>(null);
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -140,6 +162,28 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     const id = setInterval(check, 10_000);
     return () => { mounted = false; clearInterval(id); };
   }, []);
+
+  // ---- Quota refresh ----
+  const refreshQuota = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/quota`);
+      if (res.ok) {
+        const data = await res.json();
+        setQuota(data);
+      } else {
+        console.warn("Failed to fetch quota:", res.status);
+      }
+    } catch (err) {
+      console.error("Failed to fetch quota:", err);
+    }
+  }, []);
+
+  // Refresh quota on mount and periodically
+  useEffect(() => {
+    refreshQuota();
+    const interval = setInterval(refreshQuota, QUOTA_REFRESH_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [refreshQuota]);
 
   // ---- Polling helpers ----
   const stopPolling = useCallback(() => {
@@ -177,6 +221,8 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               total: data.total_rows ?? 0,
               outputFile: data.output_file ?? null,
             }));
+            // Refresh quota after job completes
+            refreshQuota();
           } else if (data.status === "failed") {
             stopPolling();
             setJob((prev) => ({
@@ -184,6 +230,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               status: "failed",
               error: data.error ?? "Scraping failed.",
             }));
+            refreshQuota();
           } else if (data.status === "cancelled") {
             stopPolling();
             setJob((prev) => ({
@@ -196,7 +243,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               outputFile: null,
               error: null,
             }));
-            // Optionally add to files if partial output exists
             if (data.output_file) {
               const newFile: ScrapedFile = {
                 id: jobId,
@@ -206,8 +252,8 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               };
               setFiles((f) => [newFile, ...f]);
             }
+            refreshQuota();
           } else if (data.status === "cancelling") {
-            // Still running, but marked for cancellation
             setJob((prev) => ({ ...prev, status: "cancelling" }));
           } else {
             // still running or created — update progress counters
@@ -222,13 +268,33 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         }
       }, POLL_INTERVAL_MS);
     },
-    [stopPolling],
+    [stopPolling, refreshQuota],
   );
 
   // ---- startJob ----
   const startJob: Ctx["startJob"] = useCallback(
-    async ({ file, sourceName, rows, column, threads, outputName, firstPageWait, nextPageWait, keywords }) => {
+    async ({
+      file,
+      sourceName,
+      rows,
+      column,
+      threads,
+      outputName,
+      firstPageWait,
+      nextPageWait,
+      keywords,
+      marketplace,
+      currencyCode,
+      currencySymbol,
+    }) => {
       stopPolling();
+
+      // --- Check quota before submitting ---
+      if (quota && rows > quota.remaining) {
+        throw new Error(
+          `Quota exceeded. You have ${quota.remaining} rows remaining, but requested ${rows} rows.`
+        );
+      }
 
       const fd = buildFormData({
         file,
@@ -238,12 +304,22 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         nextPageWait: nextPageWait ?? 5,
         outputName,
         keywords: keywords ?? [],
+        marketplace,
+        currencyCode,
+        currencySymbol,
       });
 
       try {
         const res = await fetch(`${API_BASE}/api/jobs`, { method: "POST", body: fd });
         if (!res.ok) {
           const errData = await res.json();
+          // Handle quota exceeded error from backend
+          if (res.status === 429 && errData.detail?.error === "QUOTA_EXCEEDED") {
+            const detail = errData.detail;
+            throw new Error(
+              `Quota exceeded. Daily limit: ${detail.daily_limit}, Used: ${detail.used}, Remaining: ${detail.remaining}, Requested: ${detail.requested}`
+            );
+          }
           throw errData;
         }
 
@@ -259,12 +335,14 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
           error: null,
         });
 
+        // Refresh quota after job starts (reserved rows)
+        refreshQuota();
+
         pollJobStatus(data.job_id, sourceName);
       } catch (err: any) {
         const detail = err && typeof err === "object" && "detail" in err ? err.detail : err;
 
         if (detail && typeof detail === "object" && detail.error === "INVALID_COLUMN") {
-          // Re-throw validation error to be caught by the component
           throw detail;
         }
 
@@ -287,13 +365,12 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         throw new Error(msg);
       }
     },
-    [stopPolling, pollJobStatus],
+    [stopPolling, pollJobStatus, quota, refreshQuota],
   );
 
   // ---- cancelJob — calls backend cancel endpoint ----
   const cancelJob = useCallback(async () => {
     if (!job.jobId) {
-      // If no jobId, just reset local state
       stopPolling();
       setJob({
         status: "idle",
@@ -315,15 +392,15 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         const err = await res.json();
         throw new Error(err.detail || "Failed to cancel job");
       }
-      // The backend will mark job as cancelling and then cancelled.
-      // We'll update state based on polling.
       setJob((prev) => ({ ...prev, status: "cancelling" }));
       toast.info("Cancelling job...");
+      // Refresh quota after cancellation
+      refreshQuota();
     } catch (error) {
       console.error("Cancel error:", error);
       toast.error(error instanceof Error ? error.message : "Failed to cancel");
     }
-  }, [job.jobId, stopPolling]);
+  }, [job.jobId, stopPolling, refreshQuota]);
 
   const deleteFile = useCallback((id: string) => {
     setFiles((f) => f.filter((x) => x.id !== id));
@@ -333,8 +410,17 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
   useEffect(() => () => stopPolling(), [stopPolling]);
 
   const value = useMemo(
-    () => ({ files, job, backendOnline, startJob, cancelJob, deleteFile }),
-    [files, job, backendOnline, startJob, cancelJob, deleteFile],
+    () => ({
+      files,
+      job,
+      backendOnline,
+      quota,
+      startJob,
+      cancelJob,
+      deleteFile,
+      refreshQuota,
+    }),
+    [files, job, backendOnline, quota, startJob, cancelJob, deleteFile, refreshQuota],
   );
 
   return <ScrapeContext.Provider value={value}>{children}</ScrapeContext.Provider>;

@@ -39,3 +39,6 @@ CORS_ORIGINS: list[str] = [
 ]
 
 
+# Add to config.py
+DAILY_QUOTA_LIMIT = int(os.environ.get("DAILY_QUOTA_LIMIT", 2000))
+
