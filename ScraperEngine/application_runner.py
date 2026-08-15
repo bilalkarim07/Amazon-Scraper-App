@@ -35,7 +35,7 @@ def main():
     parser.add_argument("--keywords", default="", help="Comma-separated keywords")
     parser.add_argument("--headless", action="store_true", help="Run in headless mode")
 
-    # NEW marketplace arguments
+    # Marketplace arguments
     parser.add_argument("--marketplace", required=True, help="Marketplace identifier (e.g., US, UK)")
     parser.add_argument("--base-url", required=True, help="Base URL for the marketplace")
     parser.add_argument("--currency-code", required=True, help="Currency code (e.g., USD)")
@@ -64,11 +64,18 @@ def main():
 
     keywords = parse_keywords(args.keywords)
 
+    # --- CANCELLATION CHECK: check for .cancel flag file ---
+    cancel_file = job_dir / ".cancel"
+
+    def cancel_check() -> bool:
+        """Return True if cancellation has been requested via the .cancel flag file."""
+        return cancel_file.exists()
+
     # Instantiate scraper with all parameters
     scraper = AmazonScraper(
-        listings=urls,                           # was 'urls' → fixed to 'listings'
-        max_threads=args.threads,                # was 'threads' → fixed to 'max_threads'
-        workspace_dir=args.job_dir,              # job_dir → workspace_dir
+        listings=urls,
+        max_threads=args.threads,
+        workspace_dir=args.job_dir,
         marketplace=args.marketplace,
         base_url=args.base_url,
         currency_code=args.currency_code,
@@ -83,9 +90,7 @@ def main():
             first_page_wait=args.first_page_wait,
             next_page_wait=args.next_page_wait,
             headless=args.headless,
-            # Optionally override price_symbol and base_append if needed:
-            # price_symbol=args.currency_symbol,
-            # base_append=args.base_url,
+            cancel_check=cancel_check,  # Pass cancellation callback
         )
     except Exception as e:
         print(json.dumps({"event": "failed", "error": str(e)}))

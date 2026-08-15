@@ -1,8 +1,10 @@
+// FrontEnd/src/routes/index.tsx
+
 import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState, useEffect } from "react";
-import { CloudUpload, FileSpreadsheet, Loader2, Play, X, Check, AlertCircle, WifiOff } from "lucide-react";
+import { CloudUpload, FileSpreadsheet, Loader2, Play, X, Check, AlertCircle, WifiOff, Download } from "lucide-react";
 import { toast } from "sonner";
-import { useScrape } from "../lib/scrape-store";
+import { useScrape, downloadFile } from "../lib/scrape-store";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -79,7 +81,7 @@ const FALLBACK_MARKETPLACES: Record<string, any> = {
 };
 
 function ScrapeNew() {
-  const { files, job, backendOnline, startJob, cancelJob, quota, refreshQuota } = useScrape();
+  const { files, job, backendOnline, startJob, cancelJob, quota, refreshQuota, resetJob } = useScrape();
 
   // ---- Marketplace state ----
   const [marketplaces, setMarketplaces] = useState<Record<string, any>>({});
@@ -106,6 +108,19 @@ function ScrapeNew() {
   const processing = job.status === "processing" || job.status === "cancelling";
   const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
   const isCancelling = job.status === "cancelling";
+
+  // ---- Reset form (for "Scrape Another") ----
+  const resetScrapeForm = () => {
+    resetJob();
+    setFileInfo(null);
+    setOutputName("");
+    setOutputTouched(false);
+    setErrors({});
+    setDragging(false);
+    if (inputRef.current) {
+      inputRef.current.value = "";
+    }
+  };
 
   // ---- Fetch marketplace config (with fallback) ----
   useEffect(() => {
@@ -194,7 +209,6 @@ function ScrapeNew() {
       setFileInfo({ name: f.name, rows, raw: f });
       setErrors((e) => ({ ...e, file: undefined }));
       toast.success(`${f.name} loaded — ${rows} rows`);
-      // If quota is available and rows exceed remaining, show warning
       if (quota && rows > quota.remaining) {
         toast.warning(`This file has ${rows} rows, but only ${quota.remaining} quota rows remaining.`);
       }
@@ -254,7 +268,6 @@ function ScrapeNew() {
       }
     }
 
-    // ---- Quota check (client-side) ----
     if (quota && fileInfo && fileInfo.rows > quota.remaining) {
       next.file = `File has ${fileInfo.rows} rows, but only ${quota.remaining} quota rows remaining.`;
     }
@@ -273,7 +286,6 @@ function ScrapeNew() {
       return;
     }
 
-    // Check quota one more time
     if (quota && fileInfo && fileInfo.rows > quota.remaining) {
       toast.error(`Quota exceeded. You have ${quota.remaining} rows remaining, but the file has ${fileInfo.rows} rows.`);
       return;
@@ -319,10 +331,36 @@ function ScrapeNew() {
     await cancelJob();
   };
 
+  // ---- Download handler ----
+  const handleDownload = async () => {
+    if (!job.jobId) {
+      toast.error("No job ID available for download");
+      return;
+    }
+    try {
+      const file: ScrapedFile = {
+        id: job.jobId,
+        name: job.outputFile ? job.outputFile.split(/[\\/]/).pop() ?? "output.csv" : "output.csv",
+        createdAt: Date.now(),
+        rows: job.done,
+      };
+      await downloadFile(file);
+      toast.success("Download started");
+    } catch (err) {
+      toast.error("Failed to download output file");
+      console.error(err);
+    }
+  };
+
   const threadDots = useMemo(() => [1, 2, 3, 4], []);
 
   // Determine if Start button should be disabled
   const isStartDisabled = !backendOnline || processing || (quota && quota.remaining <= 0) || (fileInfo && quota && fileInfo.rows > quota.remaining);
+
+  const isDone = job.status === "done";
+  const isCancelled = job.status === "cancelled";
+  const isFailed = job.status === "failed";
+  const showResult = isDone || isCancelled;
 
   return (
     <main className="mx-auto w-full max-w-3xl px-5 py-10 md:py-16">
@@ -465,197 +503,265 @@ function ScrapeNew() {
         </div>
         <FieldError msg={errors.file} />
 
-        {/* Fields */}
-        <div className="mt-6 grid gap-5">
-          {/* Column Name */}
-          <Field label="Column Name" hint="Header holding the product URLs" error={errors.column}>
-            <input
-              value={column}
-              disabled={processing}
-              onChange={(e) => {
-                setColumn(e.target.value);
-                setErrors((prev) => ({ ...prev, column: undefined }));
-              }}
-              placeholder="Links"
-              className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-            />
-          </Field>
-
-          {/* ---- Marketplace and Currency (fixed layout) ---- */}
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
-                Amazon Marketplace
-              </label>
-              <select
-                value={marketplace}
-                onChange={handleMarketplaceChange}
-                disabled={processing || loadingMarketplaces}
-                className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-              >
-                {Object.entries(marketplaces).map(([id, config]) => (
-                  <option key={id} value={id}>
-                    {config.label} ({config.domain})
-                  </option>
-                ))}
-              </select>
-              <p className="mt-1 text-xs text-muted-foreground">Select the target region</p>
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
-                Currency
-              </label>
-              <div className="flex items-center gap-2 rounded-lg border-2 bg-muted/40 px-3 py-2 text-sm font-medium h-[42px]">
-                <span className="text-lg">{currencySymbol}</span>
-                <span>{currencyCode}</span>
-                {marketplace === "ALL_EUROPE" && (
-                  <span className="ml-auto text-xs text-muted-foreground">
-                    ⓘ Auto-detected
-                  </span>
-                )}
-              </div>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {marketplace === "ALL_EUROPE"
-                  ? "Currency is detected from each Amazon URL."
-                  : "Currency is automatically set for this marketplace."}
-              </p>
-            </div>
-          </div>
-
-          {/* Threads */}
-          <Field label="Threads" hint="Parallel workers (1–4)" error={errors.threads}>
+        {/* ---- Result states (done / cancelled) ---- */}
+        {showResult && (
+          <div className="mt-6 rounded-xl border-2 border-primary/20 bg-primary/5 p-6 space-y-4">
             <div className="flex items-center gap-3">
-              <input
-                type="number"
-                min={1}
-                max={4}
-                value={threads}
-                disabled={processing}
-                onChange={(e) => setThreads(e.target.value)}
-                className="w-24 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-              />
-              <div className="flex gap-1.5">
-                {threadDots.map((n) => (
-                  <button
-                    key={n}
-                    disabled={processing}
-                    onClick={() => setThreads(String(n))}
-                    className={`h-8 w-8 rounded-lg border-2 text-xs font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60 ${
-                      Number(threads) === n ? "bg-primary shadow-[2px_2px_0_0_var(--ink)]" : "bg-card"
-                    }`}
-                  >
-                    {n}
-                  </button>
-                ))}
+              <div className="rounded-full bg-green-500/20 p-2 text-green-600">
+                <Check className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="font-display text-lg font-bold">
+                  {isDone ? "✓ Scraping finished" : "✓ Scraping cancelled"}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {isDone
+                    ? `Finished ${job.total} listings from ${job.sourceName}`
+                    : `Saved ${job.done} listings from ${job.sourceName}`}
+                </p>
               </div>
             </div>
-          </Field>
 
-          {/* Batch Gap */}
-          <Field label="Batch Gap" hint="Seconds to wait between batches" error={errors.gap}>
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={0}
-                value={gap}
-                disabled={processing}
-                onChange={(e) => setGap(e.target.value)}
-                className="w-32 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-              />
-              <span className="text-sm text-muted-foreground">seconds</span>
+            {/* Buttons */}
+            <div className="flex flex-wrap gap-3">
+              <button
+                onClick={handleDownload}
+                className="inline-flex items-center gap-2 rounded-lg border-2 bg-primary px-5 py-2.5 font-mono text-xs font-semibold uppercase tracking-widest text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] transition-transform hover:-translate-y-0.5 press disabled:opacity-50"
+              >
+                <Download className="h-4 w-4" />
+                Download File
+              </button>
+              <button
+                onClick={resetScrapeForm}
+                className="inline-flex items-center gap-2 rounded-lg border-2 bg-primary px-5 py-2.5 font-mono text-xs font-semibold uppercase tracking-widest text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] transition-transform hover:-translate-y-0.5 press"
+              >
+                <Play className="h-4 w-4" />
+                Scrape Another
+              </button>
             </div>
-          </Field>
 
-          {/* First Page Wait */}
-          <Field
-            label="First Page Wait"
-            hint="Minutes (1–5) – optional"
-            error={errors.firstPageWait}
-          >
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min={1}
-                max={5}
-                value={firstPageWait}
-                disabled={processing}
-                onChange={(e) => setFirstPageWait(e.target.value)}
-                className="w-24 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-              />
-              <span className="text-sm text-muted-foreground">minutes</span>
+            {/* Files page message */}
+            <p className="text-sm text-muted-foreground">
+              You can access this output file later from the Files page.
+            </p>
+          </div>
+        )}
+
+        {/* ---- Failed state ---- */}
+        {isFailed && (
+          <div className="mt-6 rounded-xl border-2 border-red-500/20 bg-red-500/5 p-6 space-y-4">
+            <div className="flex items-center gap-3">
+              <div className="rounded-full bg-red-500/20 p-2 text-red-600">
+                <AlertCircle className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="font-display text-lg font-bold text-red-600">Scraping failed</h2>
+                {job.error && <p className="text-sm text-muted-foreground">{job.error}</p>}
+              </div>
             </div>
-          </Field>
+            <button
+              onClick={resetScrapeForm}
+              className="inline-flex items-center gap-2 rounded-lg border-2 bg-primary px-5 py-2.5 font-mono text-xs font-semibold uppercase tracking-widest text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] transition-transform hover:-translate-y-0.5 press"
+            >
+              <Play className="h-4 w-4" />
+              Try again
+            </button>
+          </div>
+        )}
 
-          {/* Next Page Wait */}
-          <Field
-            label="Next Page Wait"
-            hint="Seconds (3–60) – optional"
-            error={errors.nextPageWait}
-          >
-            <div className="flex items-center gap-2">
+        {/* ---- Fields (only shown when not in result or failed state) ---- */}
+        {!showResult && !isFailed && (
+          <div className="mt-6 grid gap-5">
+            {/* Column Name */}
+            <Field label="Column Name" hint="Header holding the product URLs" error={errors.column}>
               <input
-                type="number"
-                min={3}
-                max={60}
-                value={nextPageWait}
-                disabled={processing}
-                onChange={(e) => setNextPageWait(e.target.value)}
-                className="w-24 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-              />
-              <span className="text-sm text-muted-foreground">seconds</span>
-            </div>
-          </Field>
-
-          {/* Keywords */}
-          <Field
-            label="Keywords"
-            hint="Comma-separated, max 10 – optional"
-            error={errors.keywords}
-          >
-            <input
-              value={keywords}
-              disabled={processing}
-              onChange={(e) => setKeywords(e.target.value)}
-              placeholder="UPC,ASIN,Model Product Information"
-              className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
-            />
-          </Field>
-
-          {/* Output File Name */}
-          <Field
-            label="Output File Name"
-            hint="Name of the scraped CSV file"
-            error={errors.outputName}
-          >
-            <div className="flex items-center gap-2">
-              <input
-                value={outputName}
+                value={column}
                 disabled={processing}
                 onChange={(e) => {
-                  setOutputName(e.target.value);
-                  setOutputTouched(true);
+                  setColumn(e.target.value);
+                  setErrors((prev) => ({ ...prev, column: undefined }));
                 }}
-                placeholder="my_scraped_data.csv"
+                placeholder="Links"
                 className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
               />
-              {fileInfo && !outputTouched && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    const base = defaultOutputName(fileInfo.name);
-                    const unique = getUniqueOutputName(base);
-                    setOutputName(unique);
-                    setOutputTouched(false);
-                  }}
-                  className="rounded-lg border-2 px-3 py-2 text-xs press"
+            </Field>
+
+            {/* ---- Marketplace and Currency (fixed layout) ---- */}
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
+                  Amazon Marketplace
+                </label>
+                <select
+                  value={marketplace}
+                  onChange={handleMarketplaceChange}
+                  disabled={processing || loadingMarketplaces}
+                  className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
                 >
-                  Reset
-                </button>
-              )}
+                  {Object.entries(marketplaces).map(([id, config]) => (
+                    <option key={id} value={id}>
+                      {config.label} ({config.domain})
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-muted-foreground">Select the target region</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
+                  Currency
+                </label>
+                <div className="flex items-center gap-2 rounded-lg border-2 bg-muted/40 px-3 py-2 text-sm font-medium h-[42px]">
+                  <span className="text-lg">{currencySymbol}</span>
+                  <span>{currencyCode}</span>
+                  {marketplace === "ALL_EUROPE" && (
+                    <span className="ml-auto text-xs text-muted-foreground">
+                      ⓘ Auto-detected
+                    </span>
+                  )}
+                </div>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {marketplace === "ALL_EUROPE"
+                    ? "Currency is detected from each Amazon URL."
+                    : "Currency is automatically set for this marketplace."}
+                </p>
+              </div>
             </div>
-          </Field>
-        </div>
+
+            {/* Threads */}
+            <Field label="Threads" hint="Parallel workers (1–4)" error={errors.threads}>
+              <div className="flex items-center gap-3">
+                <input
+                  type="number"
+                  min={1}
+                  max={4}
+                  value={threads}
+                  disabled={processing}
+                  onChange={(e) => setThreads(e.target.value)}
+                  className="w-24 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+                />
+                <div className="flex gap-1.5">
+                  {threadDots.map((n) => (
+                    <button
+                      key={n}
+                      disabled={processing}
+                      onClick={() => setThreads(String(n))}
+                      className={`h-8 w-8 rounded-lg border-2 text-xs font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60 ${
+                        Number(threads) === n ? "bg-primary shadow-[2px_2px_0_0_var(--ink)]" : "bg-card"
+                      }`}
+                    >
+                      {n}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </Field>
+
+            {/* Batch Gap */}
+            <Field label="Batch Gap" hint="Seconds to wait between batches" error={errors.gap}>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={0}
+                  value={gap}
+                  disabled={processing}
+                  onChange={(e) => setGap(e.target.value)}
+                  className="w-32 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+                />
+                <span className="text-sm text-muted-foreground">seconds</span>
+              </div>
+            </Field>
+
+            {/* First Page Wait */}
+            <Field
+              label="First Page Wait"
+              hint="Minutes (1–5) – optional"
+              error={errors.firstPageWait}
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={1}
+                  max={5}
+                  value={firstPageWait}
+                  disabled={processing}
+                  onChange={(e) => setFirstPageWait(e.target.value)}
+                  className="w-24 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+                />
+                <span className="text-sm text-muted-foreground">minutes</span>
+              </div>
+            </Field>
+
+            {/* Next Page Wait */}
+            <Field
+              label="Next Page Wait"
+              hint="Seconds (3–60) – optional"
+              error={errors.nextPageWait}
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  min={3}
+                  max={60}
+                  value={nextPageWait}
+                  disabled={processing}
+                  onChange={(e) => setNextPageWait(e.target.value)}
+                  className="w-24 rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+                />
+                <span className="text-sm text-muted-foreground">seconds</span>
+              </div>
+            </Field>
+
+            {/* Keywords */}
+            <Field
+              label="Keywords"
+              hint="Comma-separated, max 10 – optional"
+              error={errors.keywords}
+            >
+              <input
+                value={keywords}
+                disabled={processing}
+                onChange={(e) => setKeywords(e.target.value)}
+                placeholder="UPC,ASIN,Model Product Information"
+                className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+              />
+            </Field>
+
+            {/* Output File Name */}
+            <Field
+              label="Output File Name"
+              hint="Name of the scraped CSV file"
+              error={errors.outputName}
+            >
+              <div className="flex items-center gap-2">
+                <input
+                  value={outputName}
+                  disabled={processing}
+                  onChange={(e) => {
+                    setOutputName(e.target.value);
+                    setOutputTouched(true);
+                  }}
+                  placeholder="my_scraped_data.csv"
+                  className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+                />
+                {fileInfo && !outputTouched && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const base = defaultOutputName(fileInfo.name);
+                      const unique = getUniqueOutputName(base);
+                      setOutputName(unique);
+                      setOutputTouched(false);
+                    }}
+                    className="rounded-lg border-2 px-3 py-2 text-xs press"
+                  >
+                    Reset
+                  </button>
+                )}
+              </div>
+            </Field>
+          </div>
+        )}
 
         {/* Action / progress */}
         <div className="mt-8">
@@ -704,60 +810,6 @@ function ScrapeNew() {
                   </button>
                 )}
               </div>
-            </div>
-          )}
-
-          {job.status === "done" && (
-            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border-2 bg-accent/40 p-4">
-              <span className="flex items-center gap-2 font-display font-semibold">
-                <Check className="h-4 w-4" /> Finished {job.total} listings from{" "}
-                {job.sourceName}
-              </span>
-              <button
-                onClick={() => {
-                  // Reset job state to idle
-                  setJob({
-                    status: "idle",
-                    jobId: null,
-                    done: 0,
-                    total: 0,
-                    sourceName: "",
-                    outputFile: null,
-                    error: null,
-                  });
-                }}
-                className="rounded-lg border-2 bg-primary px-4 py-2 text-xs font-semibold press"
-              >
-                Scrape another
-              </button>
-            </div>
-          )}
-
-          {job.status === "failed" && (
-            <div className="flex flex-wrap items-start gap-3 rounded-xl border-2 border-destructive/40 bg-destructive/10 p-4">
-              <AlertCircle className="h-5 w-5 shrink-0 text-destructive mt-0.5" />
-              <div className="flex-1 min-w-0">
-                <p className="font-display font-semibold text-destructive">Scraping failed</p>
-                {job.error && (
-                  <p className="mt-1 text-xs text-muted-foreground break-words">{job.error}</p>
-                )}
-              </div>
-              <button
-                onClick={() => {
-                  setJob({
-                    status: "idle",
-                    jobId: null,
-                    done: 0,
-                    total: 0,
-                    sourceName: "",
-                    outputFile: null,
-                    error: null,
-                  });
-                }}
-                className="rounded-lg border-2 bg-primary px-4 py-2 text-xs font-semibold press"
-              >
-                Try again
-              </button>
             </div>
           )}
         </div>

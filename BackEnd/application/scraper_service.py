@@ -108,6 +108,29 @@ def _tail_log(path: Path, lines: int = 20) -> str:
         return ""
 
 
+# --- Helpers for cancellation and partial-result counting ---
+
+def _count_successful_rows_from_threads(job_dir: Path) -> int:
+    """Count successfully scraped rows from thread CSV files in the workspace."""
+    workspace_dir = job_dir / "workspace"
+    if not workspace_dir.exists():
+        return 0
+    total = 0
+    for thread_file in workspace_dir.glob("thread_*.csv"):
+        try:
+            with open(thread_file, "r", encoding="utf-8") as fh:
+                # Subtract 1 for header row
+                total += max(0, sum(1 for _ in csv.reader(fh)) - 1)
+        except Exception:
+            continue
+    return total
+
+
+def _is_cancelled(job_dir: Path) -> bool:
+    """Check if the .cancel flag file exists."""
+    return (job_dir / ".cancel").exists()
+
+
 def _run_engine(
     job_id: str,
     job_dir: Path,
@@ -211,6 +234,35 @@ def _run_engine(
             job = job_service.get_job(job_id)
             requested_rows = job.get("requested_rows", 0) if job else 0
 
+            # --- Check if cancellation was requested ---
+            cancellation_requested = _is_cancelled(job_dir)
+
+            # --- If no "completed" event was received, fall back to counting thread files ---
+            if successful_rows == 0 and not cancellation_requested:
+                successful_rows = _count_successful_rows_from_threads(job_dir)
+
+            # --- Handle cancellation ---
+            if cancellation_requested:
+                # Count actual successful rows from thread CSVs (more reliable than progress events)
+                actual_successful = _count_successful_rows_from_threads(job_dir)
+                if actual_successful > 0:
+                    successful_rows = actual_successful
+                # If we have a partial output file, use its row count too (paranoid fallback)
+                if output_csv_path.is_file() and successful_rows == 0:
+                    successful_rows = _count_csv_rows(output_csv_path)
+
+                # --- Settle quota for cancelled job ---
+                if requested_rows > 0:
+                    try:
+                        quota_service.settle_quota(job_id, requested_rows, successful_rows)
+                    except Exception as exc:
+                        logging.error(f"Quota settlement failed for cancelled job {job_id}: {exc}")
+
+                # Mark as cancelled with actual processed count
+                job_service.mark_cancelled(job_id, successful_rows)
+                return
+
+            # --- Normal completion path ---
             # --- SETTLE QUOTA (idempotent) with error handling ---
             quota_failed = False
             quota_error = None
@@ -235,12 +287,19 @@ def _run_engine(
                     job_service.mark_completed(
                         job_id,
                         output_file=str(output_csv_path),
-                        processed_rows=processed_rows,
+                        processed_rows=processed_rows if processed_rows > 0 else successful_rows,
                     )
             else:
                 job = job_service.get_job(job_id)  # refresh
                 if job and job.get("status") == "cancelling":
-                    job_service.mark_cancelled(job_id, processed_rows)
+                    # Double-check: if status is cancelling but we didn't handle it above
+                    actual_successful = _count_successful_rows_from_threads(job_dir)
+                    if requested_rows > 0:
+                        try:
+                            quota_service.settle_quota(job_id, requested_rows, actual_successful)
+                        except Exception as exc:
+                            logging.error(f"Quota settlement failed for cancelling job {job_id}: {exc}")
+                    job_service.mark_cancelled(job_id, actual_successful)
                 else:
                     error_snippet = _tail_log(log_path, lines=20)
                     job_service.mark_failed(
