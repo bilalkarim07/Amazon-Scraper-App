@@ -9,9 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Optional
+import logging
 
-from application.config import JOBS_DIR
 from application import job_service
+from application.storage import get_app_data_root
+
+logger = logging.getLogger(__name__)
 
 
 def get_output_path(job_id: str) -> Optional[Path]:
@@ -20,6 +23,9 @@ def get_output_path(job_id: str) -> Optional[Path]:
       - the job doesn't exist
       - the job is not yet completed
       - the output file is missing from disk
+
+    Supports both absolute paths (legacy) and paths relative to the
+    application data root (new centralized storage).
     """
     job = job_service.get_job(job_id)
     if not job:
@@ -30,4 +36,19 @@ def get_output_path(job_id: str) -> Optional[Path]:
         return None
 
     path = Path(output_file)
-    return path if path.is_file() else None
+
+    # If the path is already absolute, use it as-is
+    if path.is_absolute():
+        if path.is_file():
+            return path
+        logger.warning("Absolute output file missing: %s", path)
+        return None
+
+    # Otherwise, resolve relative to the application data root
+    app_root = get_app_data_root()
+    resolved_path = app_root / output_file
+    if resolved_path.is_file():
+        return resolved_path
+
+    logger.warning("Output file not found at resolved path: %s", resolved_path)
+    return None

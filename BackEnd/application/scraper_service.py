@@ -14,6 +14,7 @@ from typing import Optional, Dict
 from application import config
 from application import job_service
 from application import quota_service
+from application.storage import get_app_data_root, get_jobs_dir
 
 _running_processes: Dict[str, subprocess.Popen] = {}
 _process_lock = threading.Lock()
@@ -42,7 +43,9 @@ def start_job(
     currency_symbol: str = "$",
 ) -> None:
     """Prepare the job workspace and launch the scraper in a background thread."""
-    job_dir = config.JOBS_DIR / job_id
+    # Use centralized Jobs directory
+    jobs_root = get_jobs_dir()
+    job_dir = jobs_root / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
 
     try:
@@ -284,9 +287,17 @@ def _run_engine(
                         error=f"Scraping succeeded but quota finalization failed: {quota_error}",
                     )
                 else:
+                    # Store output path relative to application data root
+                    app_root = get_app_data_root()
+                    try:
+                        relative_output = str(output_csv_path.relative_to(app_root))
+                    except ValueError:
+                        # Fallback: store absolute if for some reason the path is outside app root
+                        relative_output = str(output_csv_path)
+
                     job_service.mark_completed(
                         job_id,
-                        output_file=str(output_csv_path),
+                        output_file=relative_output,  # Store relative path
                         processed_rows=processed_rows if processed_rows > 0 else successful_rows,
                     )
             else:
@@ -338,7 +349,9 @@ def cancel_job(job_id: str) -> bool:
 
     job_service.mark_cancelling(job_id)
 
-    job_dir = config.JOBS_DIR / job_id
+    # Use centralized Jobs directory
+    jobs_root = get_jobs_dir()
+    job_dir = jobs_root / job_id
     cancel_file = job_dir / ".cancel"
     try:
         cancel_file.touch()
