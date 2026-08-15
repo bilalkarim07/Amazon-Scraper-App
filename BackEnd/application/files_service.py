@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,7 +12,7 @@ from typing import Optional, List, Dict, Any
 import logging
 import os
 
-from application.files_database import get_files_connection, init_files_db
+from application.files_database import get_files_connection
 from application.storage import get_app_data_root, get_files_dir
 from application import job_service
 
@@ -28,24 +29,34 @@ def _row_to_dict(row) -> dict:
     return dict(row) if row else None
 
 
-def generate_unique_filename(job_id: str, original_filename: str = "output.csv") -> str:
+def generate_unique_filename(base_name: str, job_id: str) -> str:
     """
-    Generate a collision-safe unique filename.
+    Generate a unique, collision‑safe filename from a user‑provided base.
 
-    Format: <job_id>_<timestamp>.csv
+    The base is sanitised and combined with a timestamp and a short job ID.
+    Example: "my_data.csv" -> "my_data_2acfd374_20260815_210319.csv"
     """
-    from datetime import datetime
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Sanitise: keep alphanumerics, underscore, dash, dot; replace others with underscore
+    sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', base_name)
+    if not sanitized:
+        sanitized = "output"
+
     # Ensure .csv extension
-    if not original_filename.lower().endswith(".csv"):
-        return f"{job_id}_{timestamp}.csv"
-    return f"{job_id}_{timestamp}.csv"
+    if not sanitized.lower().endswith('.csv'):
+        sanitized += '.csv'
+
+    # Split name and extension
+    name, ext = os.path.splitext(sanitized)
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # Use first 8 chars of job_id for brevity
+    short_job_id = job_id[:8] if len(job_id) >= 8 else job_id
+    return f"{name}_{short_job_id}_{timestamp}{ext}"
 
 
 def create_file_record(
     job_id: str,
     source_path: Path,
-    filename: Optional[str] = None,
+    base_name: Optional[str] = None,
     status: str = "final",
     marketplace: Optional[str] = None,
     currency_code: Optional[str] = None,
@@ -58,7 +69,7 @@ def create_file_record(
     Args:
         job_id: The ID of the job that generated the file
         source_path: Path to the source file in the job workspace
-        filename: Optional custom filename (auto-generated if not provided)
+        base_name: Optional user‑provided base filename (used to generate a unique name)
         status: 'final' or 'partial'
         marketplace: Marketplace identifier
         currency_code: Currency code
@@ -72,18 +83,14 @@ def create_file_record(
         logger.error(f"Source file does not exist: {source_path}")
         return None
 
-    # Generate unique filename
-    if filename is None:
-        filename = generate_unique_filename(job_id, source_path.name)
-
-    # Sanitize filename (prevent path traversal)
-    filename = Path(filename).name
-    if not filename.lower().endswith(".csv"):
-        filename += ".csv"
+    # Generate unique filename from the base name (or fallback to source_path.name)
+    if base_name is None:
+        base_name = source_path.name
+    unique_filename = generate_unique_filename(base_name, job_id)
 
     # Destination path in Files directory
     files_dir = get_files_dir()
-    dest_path = files_dir / filename
+    dest_path = files_dir / unique_filename
 
     # Ensure Files directory exists
     files_dir.mkdir(parents=True, exist_ok=True)
@@ -117,8 +124,8 @@ def create_file_record(
             """,
             (
                 job_id,
-                filename,
-                relative_path,
+                unique_filename,          # Display name
+                relative_path,            # Physical path
                 now,
                 now,
                 row_count,
@@ -285,6 +292,7 @@ def finalize_job_output(
     output_filename: str = "output.csv",
     status: str = "final",
     row_count: Optional[int] = None,
+    base_name: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """
     Finalize a job's output by copying it to the Files directory and creating a record.
@@ -297,6 +305,7 @@ def finalize_job_output(
         output_filename: The name of the output file in the job workspace
         status: 'final' or 'partial'
         row_count: Optional row count (will be counted if not provided)
+        base_name: Optional user‑provided base name for the file (used to generate unique name)
 
     Returns:
         The created file record, or None if no output file exists
@@ -326,10 +335,15 @@ def finalize_job_output(
         except Exception:
             row_count = 0
 
+    # Use the base name if provided, else fallback to the filename in the workspace
+    if base_name is None:
+        base_name = output_filename
+
     # Create the file record
     return create_file_record(
         job_id=job_id,
         source_path=source_path,
+        base_name=base_name,
         status=status,
         marketplace=marketplace,
         currency_code=currency_code,

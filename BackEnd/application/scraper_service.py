@@ -255,7 +255,7 @@ def _run_engine(
                 if output_csv_path.is_file() and successful_rows == 0:
                     successful_rows = _count_csv_rows(output_csv_path)
 
-                # --- Finalize partial output to Files/ ---
+                # --- Finalize partial output to Files/ (with user‑provided base name) ---
                 if output_csv_path.is_file() and successful_rows > 0:
                     file_record = files_service.finalize_job_output(
                         job_id=job_id,
@@ -263,6 +263,7 @@ def _run_engine(
                         output_filename=output_csv_path.name,
                         status="partial",
                         row_count=successful_rows,
+                        base_name=output_csv_path.name,   # <--- FIX: user‑provided name
                     )
                     if file_record:
                         # Store the persistent file path in the job record
@@ -307,13 +308,14 @@ def _run_engine(
                         error=f"Scraping succeeded but quota finalization failed: {quota_error}",
                     )
                 else:
-                    # --- FINALIZE OUTPUT TO FILES DIRECTORY ---
+                    # --- FINALIZE OUTPUT TO FILES DIRECTORY (with user‑provided base name) ---
                     file_record = files_service.finalize_job_output(
                         job_id=job_id,
                         job_dir=job_dir,
                         output_filename=output_csv_path.name,
                         status="final",
                         row_count=successful_rows if successful_rows > 0 else processed_rows,
+                        base_name=output_csv_path.name,   # <--- FIX: user‑provided name
                     )
 
                     if file_record:

@@ -1,5 +1,3 @@
-// FrontEnd/src/lib/scrape-store.tsx
-
 import {
   createContext,
   useCallback,
@@ -25,9 +23,9 @@ const QUOTA_REFRESH_INTERVAL_MS = 60000;
 // ---------------------------------------------------------------------------
 
 export type ScrapedFile = {
-  id: string;
+  id: string;          // backend file id (int) as string
   name: string;
-  createdAt: number;
+  createdAt: number;   // timestamp in ms
   rows: number;
 };
 
@@ -68,13 +66,14 @@ type Ctx = {
     currencySymbol: string;
   }) => Promise<void>;
   cancelJob: () => Promise<void>;
-  deleteFile: (id: string) => void;
+  deleteFile: (id: string) => Promise<void>;
+  downloadFile: (file: ScrapedFile) => Promise<void>;
+  refreshFiles: () => Promise<void>;
   refreshQuota: () => Promise<void>;
   resetJob: () => void;
 };
 
 const ScrapeContext = createContext<Ctx | null>(null);
-const FILES_STORAGE_KEY = "amz-scraper-files-v2";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -125,23 +124,8 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
   const [quota, setQuota] = useState<QuotaState | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ---- Persist files list to localStorage ----
-  useEffect(() => {
-    try {
-      const raw = localStorage.getItem(FILES_STORAGE_KEY);
-      if (raw) setFiles(JSON.parse(raw) as ScrapedFile[]);
-    } catch {
-      /* ignore */
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem(FILES_STORAGE_KEY, JSON.stringify(files));
-    } catch {
-      /* ignore */
-    }
-  }, [files]);
+  // ---- REMOVED localStorage for files ----
+  // No FILES_STORAGE_KEY, no useEffect for load/save.
 
   // ---- Backend health check ----
   useEffect(() => {
@@ -181,6 +165,78 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     return () => clearInterval(interval);
   }, [refreshQuota]);
 
+  // ---- REFRESH FILES (fetch from backend) ----
+  const refreshFiles = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/files`);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch files: ${res.status} ${res.statusText}`);
+      }
+      const data = await res.json();
+      // Map backend records to ScrapedFile type
+      const mapped: ScrapedFile[] = data.map((item: any) => ({
+        id: String(item.id),           // backend uses integer id
+        name: item.filename,
+        createdAt: new Date(item.created_at).getTime(),
+        rows: item.row_count ?? 0,
+      }));
+      setFiles(mapped);
+    } catch (err) {
+      console.error("refreshFiles error:", err);
+      throw err;
+    }
+  }, []);
+
+  // ---- DOWNLOAD FILE (uses file_id) ----
+  const downloadFile = useCallback(async (file: ScrapedFile) => {
+    try {
+      const url = `${API_BASE}/api/files/${file.id}/download`;
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`Download failed: ${res.status}`);
+      }
+      // Get filename from Content-Disposition or fallback
+      const disposition = res.headers.get("content-disposition");
+      let filename = file.name;
+      if (disposition) {
+        const match = disposition.match(/filename="?(.+)"?/);
+        if (match) filename = match[1];
+      }
+      const blob = await res.blob();
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(blob);
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
+      toast.success(`Downloaded ${filename}`);
+    } catch (err: any) {
+      console.error("Download error:", err);
+      toast.error(err.message || "Download failed");
+      throw err;
+    }
+  }, []);
+
+  // ---- DELETE FILE (calls backend + refresh) ----
+  const deleteFile = useCallback(async (id: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/files/${id}`, {
+        method: "DELETE",
+      });
+      if (!res.ok) {
+        throw new Error(`Delete failed: ${res.status}`);
+      }
+      // Re-fetch authoritative list from backend
+      await refreshFiles();
+      toast.success("File deleted");
+    } catch (err: any) {
+      console.error("Delete error:", err);
+      toast.error(err.message || "Delete failed");
+      throw err;
+    }
+  }, [refreshFiles]);
+
   // ---- Polling helpers ----
   const stopPolling = useCallback(() => {
     if (pollRef.current) {
@@ -200,15 +256,12 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
 
           if (data.status === "completed") {
             stopPolling();
-            const newFile: ScrapedFile = {
-              id: jobId,
-              name: data.output_file
-                ? data.output_file.split(/[\\/]/).pop() ?? "output.csv"
-                : "output.csv",
-              createdAt: Date.now(),
-              rows: data.total_rows ?? 0,
-            };
-            setFiles((f) => [newFile, ...f]);
+            // ✅ Refresh files from backend (authoritative)
+            try {
+              await refreshFiles();
+            } catch (err) {
+              console.warn("Failed to refresh files after job completion", err);
+            }
             setJob((prev) => ({
               ...prev,
               status: "done",
@@ -227,7 +280,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
             refreshQuota();
           } else if (data.status === "cancelled") {
             stopPolling();
-            // ✅ FIX: Keep the job in a "cancelled" state with the output file
+            // ✅ Keep job in cancelled state and refresh files for partial output
             const processedRows = data.processed_rows ?? 0;
             setJob((prev) => ({
               ...prev,
@@ -237,15 +290,11 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               outputFile: data.output_file ?? null,
               error: null,
             }));
-            // Add the partial output to Files if it exists
-            if (data.output_file) {
-              const newFile: ScrapedFile = {
-                id: jobId,
-                name: data.output_file.split(/[\\/]/).pop() ?? "output.csv",
-                createdAt: Date.now(),
-                rows: processedRows,
-              };
-              setFiles((f) => [newFile, ...f]);
+            // Refresh files to pick up any partial output
+            try {
+              await refreshFiles();
+            } catch (err) {
+              console.warn("Failed to refresh files after cancellation", err);
             }
             refreshQuota();
           } else if (data.status === "cancelling") {
@@ -263,7 +312,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         }
       }, POLL_INTERVAL_MS);
     },
-    [stopPolling, refreshQuota]
+    [stopPolling, refreshFiles, refreshQuota]
   );
 
   // ---- resetJob ----
@@ -385,16 +434,24 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       setJob((prev) => ({ ...prev, status: "cancelling" }));
       toast.info("Cancelling job...");
       refreshQuota();
+      // After cancellation, refresh files (if any partial output)
+      try {
+        await refreshFiles();
+      } catch (err) {
+        console.warn("Failed to refresh files after cancel request", err);
+      }
     } catch (error) {
       console.error("Cancel error:", error);
       toast.error(error instanceof Error ? error.message : "Failed to cancel");
     }
-  }, [job.jobId, stopPolling, refreshQuota, resetJob]);
+  }, [job.jobId, stopPolling, refreshQuota, resetJob, refreshFiles]);
 
-  // ---- deleteFile ----
-  const deleteFile = useCallback((id: string) => {
-    setFiles((f) => f.filter((x) => x.id !== id));
-  }, []);
+  // ---- Initial load: fetch files on mount ----
+  useEffect(() => {
+    refreshFiles().catch((err) => {
+      console.warn("Initial files fetch failed:", err);
+    });
+  }, [refreshFiles]);
 
   // Cleanup polling on unmount
   useEffect(() => () => stopPolling(), [stopPolling]);
@@ -408,10 +465,24 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       startJob,
       cancelJob,
       deleteFile,
+      downloadFile,
+      refreshFiles,
       refreshQuota,
       resetJob,
     }),
-    [files, job, backendOnline, quota, startJob, cancelJob, deleteFile, refreshQuota, resetJob]
+    [
+      files,
+      job,
+      backendOnline,
+      quota,
+      startJob,
+      cancelJob,
+      deleteFile,
+      downloadFile,
+      refreshFiles,
+      refreshQuota,
+      resetJob,
+    ]
   );
 
   return <ScrapeContext.Provider value={value}>{children}</ScrapeContext.Provider>;
@@ -425,21 +496,4 @@ export function useScrape() {
   const ctx = useContext(ScrapeContext);
   if (!ctx) throw new Error("useScrape must be used inside ScrapeProvider");
   return ctx;
-}
-
-// ---------------------------------------------------------------------------
-// Download helper
-// ---------------------------------------------------------------------------
-
-export async function downloadFile(file: ScrapedFile): Promise<void> {
-  const url = `${API_BASE}/api/jobs/${file.id}/download`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Download failed: ${res.status}`);
-  const blob = await res.blob();
-  const objectUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = objectUrl;
-  a.download = file.name;
-  a.click();
-  URL.revokeObjectURL(objectUrl);
 }
