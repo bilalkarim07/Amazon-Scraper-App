@@ -212,9 +212,7 @@ def _run_engine(
             requested_rows = job.get("requested_rows", 0) if job else 0
 
             # --- SETTLE QUOTA (idempotent) ---
-            # We settle regardless of final status, but only once per job.
             if requested_rows > 0:
-                # settle_quota checks quota_settled internally, so it's safe to call multiple times.
                 quota_service.settle_quota(job_id, requested_rows, successful_rows)
 
             # --- Update job status ---

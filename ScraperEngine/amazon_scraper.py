@@ -169,6 +169,17 @@ class AmazonScraper:
             with exception_lock:
                 worker_exceptions.append(exc)
 
+        # --- Worker result aggregation ---
+        total_success = 0
+        total_failed = 0
+        results_lock = threading.Lock()
+
+        def record_worker_result(success: int, failed: int):
+            nonlocal total_success, total_failed
+            with results_lock:
+                total_success += success
+                total_failed += failed
+
         threads = []
         for i, chunk in enumerate(url_chunks, start=1):
             worker = ThreadWorker(
@@ -184,7 +195,8 @@ class AmazonScraper:
                 progress_reporter=progress_reporter,
                 cancel_check=cancel_check,
                 base_url=self.base_url,
-                exception_callback=record_exception,   # <-- pass callback
+                exception_callback=record_exception,
+                result_callback=record_worker_result,   # <-- NEW
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
@@ -205,12 +217,16 @@ class AmazonScraper:
             progress_reporter.emit_failed(error_msg)
             raise RuntimeError(error_msg)
 
-        progress_reporter.emit_completed()
+        # --- Emit final aggregated completed event ---
+        progress_reporter.emit_final_completed(
+            total=total_urls,
+            successful=total_success,
+            failed=total_failed
+        )
 
         self._merge_results(output_file)
 
-        # --- No empty CSV fallback ---
-        # If output_file does not exist, raise an error.
+        # --- If output_file still doesn't exist, raise an error ---
         if not os.path.exists(output_file):
             raise RuntimeError("No output file created – all workers failed or produced no data.")
 

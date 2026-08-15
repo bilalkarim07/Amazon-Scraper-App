@@ -30,6 +30,7 @@ class ThreadWorker:
         cancel_check: Optional[Callable[[], bool]] = None,
         base_url: str = "https://www.amazon.com/",
         exception_callback: Optional[Callable[[Exception], None]] = None,
+        result_callback: Optional[Callable[[int, int], None]] = None,  # NEW
     ):
         self.thread_id = thread_id
         self.urls = urls
@@ -46,6 +47,7 @@ class ThreadWorker:
         self.cancel_check = cancel_check
         self.base_url = base_url
         self.exception_callback = exception_callback
+        self.result_callback = result_callback  # NEW
 
     def _create_driver(self):
         try:
@@ -131,7 +133,11 @@ class ThreadWorker:
 
             logger.info(f"Thread {self.thread_id} completed. Success: {success_count}, Failed: {failure_count}")
 
-            # Emit a completed event with success/failure counts (if progress reporter supports it)
+            # --- Call result callback before emitting completed event ---
+            if self.result_callback:
+                self.result_callback(success_count, failure_count)
+
+            # Emit a completed event with success/failure counts
             if self.progress_reporter:
                 self.progress_reporter.emit_completed_with_counts(success_count, failure_count, total_urls)
 
