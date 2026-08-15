@@ -211,17 +211,32 @@ def _run_engine(
             job = job_service.get_job(job_id)
             requested_rows = job.get("requested_rows", 0) if job else 0
 
-            # --- SETTLE QUOTA (idempotent) ---
+            # --- SETTLE QUOTA (idempotent) with error handling ---
+            quota_failed = False
+            quota_error = None
             if requested_rows > 0:
-                quota_service.settle_quota(job_id, requested_rows, successful_rows)
+                try:
+                    quota_service.settle_quota(job_id, requested_rows, successful_rows)
+                except Exception as exc:
+                    quota_failed = True
+                    quota_error = str(exc)
+                    logging.error(f"Quota settlement failed for job {job_id}: {exc}")
 
             # --- Update job status ---
             if return_code == 0 and output_csv_path.is_file():
-                job_service.mark_completed(
-                    job_id,
-                    output_file=str(output_csv_path),
-                    processed_rows=processed_rows,
-                )
+                if quota_failed:
+                    # Scraping succeeded but quota finalization failed.
+                    # Preserve the output CSV but mark job as failed with clear error.
+                    job_service.mark_failed(
+                        job_id,
+                        error=f"Scraping succeeded but quota finalization failed: {quota_error}",
+                    )
+                else:
+                    job_service.mark_completed(
+                        job_id,
+                        output_file=str(output_csv_path),
+                        processed_rows=processed_rows,
+                    )
             else:
                 job = job_service.get_job(job_id)  # refresh
                 if job and job.get("status") == "cancelling":
@@ -240,7 +255,12 @@ def _run_engine(
         job = job_service.get_job(job_id)
         requested = job.get("requested_rows", 0) if job else 0
         if requested > 0:
-            quota_service.release_reserved(job_id, requested)
+            try:
+                quota_service.release_reserved(job_id, requested)
+            except Exception as quota_exc:
+                logging.error(f"Failed to release reserved quota for job {job_id}: {quota_exc}")
+                # Append quota error to the main error for visibility
+                exc = Exception(f"{exc} (quota release failed: {quota_exc})")
         job_service.mark_failed(job_id, str(exc))
 
 

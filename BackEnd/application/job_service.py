@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from application.database import get_connection
 from application import job_service
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 

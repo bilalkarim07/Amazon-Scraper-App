@@ -115,6 +115,7 @@ def get_quota_for_frontend() -> dict:
         "remaining": quota["remaining"],
         "date": quota["quota_date"]
     }
+
 def consume_quota(rows_to_consume: int) -> bool:
     """
     Atomically consume a specific number of quota rows.
@@ -154,3 +155,27 @@ def consume_quota(rows_to_consume: int) -> bool:
         )
         conn.commit()
         return True
+
+
+# --- Phase 1 integration methods ---
+
+def settle_quota(job_id: str, requested_rows: int, successful_rows: int) -> None:
+    """
+    Release unused rows that were reserved but not successfully processed.
+    Does NOT consume quota because reserve_quota() already added to used.
+    """
+    if requested_rows <= 0:
+        return
+
+    successful_rows = max(0, min(successful_rows, requested_rows))
+    unused_rows = requested_rows - successful_rows
+
+    if unused_rows > 0:
+        release_quota(unused_rows)
+
+
+def release_reserved(job_id: str, requested_rows: int) -> None:
+    """Release all previously reserved quota for a job that failed."""
+    if requested_rows <= 0:
+        return
+    release_quota(requested_rows)

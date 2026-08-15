@@ -196,7 +196,7 @@ class AmazonScraper:
                 cancel_check=cancel_check,
                 base_url=self.base_url,
                 exception_callback=record_exception,
-                result_callback=record_worker_result,   # <-- NEW
+                result_callback=record_worker_result,
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
@@ -218,10 +218,11 @@ class AmazonScraper:
             raise RuntimeError(error_msg)
 
         # --- Emit final aggregated completed event ---
-        progress_reporter.emit_final_completed(
-            total=total_urls,
-            successful=total_success,
-            failed=total_failed
+        # REPLACED: emit_final_completed with emit_completed_with_counts
+        progress_reporter.emit_completed_with_counts(
+            success=total_success,
+            failed=total_failed,
+            total=total_urls
         )
 
         self._merge_results(output_file)
