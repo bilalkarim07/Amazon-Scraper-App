@@ -28,24 +28,34 @@ def get_app_data_root() -> Path:
 
 
 def get_database_path() -> Path:
+    """Return the path to the main application database (app.db)."""
     return get_app_data_root() / "Database" / "app.db"
 
 
+def get_files_database_path() -> Path:
+    """Return the path to the files metadata database (files.db)."""
+    return get_app_data_root() / "Database" / "files.db"
+
+
 def get_files_dir() -> Path:
+    """Return the directory for persistent output CSV files."""
     return get_app_data_root() / "Files"
 
 
 def get_jobs_dir() -> Path:
+    """Return the directory for job workspaces."""
     return get_app_data_root() / "Jobs"
 
 
 def get_job_dir(job_id: str) -> Path:
+    """Return the workspace directory for a specific job."""
     return get_jobs_dir() / job_id
 
 
 def ensure_directories() -> None:
     """Create all required directories if they don't exist."""
     get_database_path().parent.mkdir(parents=True, exist_ok=True)
+    get_files_database_path().parent.mkdir(parents=True, exist_ok=True)
     get_files_dir().mkdir(parents=True, exist_ok=True)
     get_jobs_dir().mkdir(parents=True, exist_ok=True)
 

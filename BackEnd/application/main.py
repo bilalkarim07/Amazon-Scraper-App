@@ -1,10 +1,6 @@
-"""
-main.py — FastAPI application entrypoint.
+# BackEnd/application/main.py
 
-Start with:
-    uv run uvicorn application.main:app --reload --port 8000
-(run from the BackEnd/ directory)
-"""
+""" main.py — FastAPI application entrypoint. """
 
 import logging
 from contextlib import asynccontextmanager
@@ -13,6 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from application import database
+from application import files_database
 from application.config import CORS_ORIGINS
 from application.routes_health import router as health_router
 from application.routes_jobs import router as jobs_router
@@ -21,40 +18,32 @@ from application.routes_quota import router as quota_router
 from application.routes_marketplaces import router as marketplaces_router
 from application.storage import ensure_directories, migrate_existing_data
 
-# Set up logging
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Lifespan — startup / shutdown hooks
-# ---------------------------------------------------------------------------
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Step 1: Create all required centralized directories (Database/, Files/, Jobs/)
+    # Step 1: Create all required centralized directories
     ensure_directories()
     logger.info("Centralized storage directories verified/created.")
 
-    # Step 2: Migrate existing data from the old project‑relative location,
-    #         if any, to the new centralized storage.
+    # Step 2: Migrate existing data from legacy location
     migration_performed = migrate_existing_data()
     if migration_performed:
         logger.info("Data migration from legacy location completed.")
     else:
         logger.info("No legacy data migration needed.")
 
-    # Step 3: Initialise the database (creates tables if needed).
-    #         This will use the new centralized database path.
+    # Step 3: Initialise the main database (jobs + quota)
     database.init_db()
-    logger.info("Database initialised.")
+    logger.info("Main database (app.db) initialised.")
+
+    # Step 4: Initialise the files database
+    files_database.init_files_db()
+    logger.info("Files database (files.db) initialised.")
 
     yield
-    # Shutdown: nothing to clean up in Phase 1
 
-
-# ---------------------------------------------------------------------------
-# App
-# ---------------------------------------------------------------------------
 
 app = FastAPI(
     title="Amazon Listing Scraper — API",
@@ -66,7 +55,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow the TanStack dev server to call us
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -75,7 +63,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routes
 app.include_router(health_router)
 app.include_router(jobs_router)
 app.include_router(files_router)

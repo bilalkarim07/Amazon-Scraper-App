@@ -14,6 +14,7 @@ from typing import Optional, Dict
 from application import config
 from application import job_service
 from application import quota_service
+from application import files_service
 from application.storage import get_app_data_root, get_jobs_dir
 
 _running_processes: Dict[str, subprocess.Popen] = {}
@@ -254,6 +255,25 @@ def _run_engine(
                 if output_csv_path.is_file() and successful_rows == 0:
                     successful_rows = _count_csv_rows(output_csv_path)
 
+                # --- Finalize partial output to Files/ ---
+                if output_csv_path.is_file() and successful_rows > 0:
+                    file_record = files_service.finalize_job_output(
+                        job_id=job_id,
+                        job_dir=job_dir,
+                        output_filename=output_csv_path.name,
+                        status="partial",
+                        row_count=successful_rows,
+                    )
+                    if file_record:
+                        # Store the persistent file path in the job record
+                        app_root = get_app_data_root()
+                        try:
+                            relative_output = str(Path(file_record["path"]))
+                        except Exception:
+                            relative_output = file_record["path"]
+                        # Update the job's output_file to point to the persistent file
+                        job_service.update_job(job_id, output_file=relative_output)
+
                 # --- Settle quota for cancelled job ---
                 if requested_rows > 0:
                     try:
@@ -287,19 +307,41 @@ def _run_engine(
                         error=f"Scraping succeeded but quota finalization failed: {quota_error}",
                     )
                 else:
-                    # Store output path relative to application data root
-                    app_root = get_app_data_root()
-                    try:
-                        relative_output = str(output_csv_path.relative_to(app_root))
-                    except ValueError:
-                        # Fallback: store absolute if for some reason the path is outside app root
-                        relative_output = str(output_csv_path)
-
-                    job_service.mark_completed(
-                        job_id,
-                        output_file=relative_output,  # Store relative path
-                        processed_rows=processed_rows if processed_rows > 0 else successful_rows,
+                    # --- FINALIZE OUTPUT TO FILES DIRECTORY ---
+                    file_record = files_service.finalize_job_output(
+                        job_id=job_id,
+                        job_dir=job_dir,
+                        output_filename=output_csv_path.name,
+                        status="final",
+                        row_count=successful_rows if successful_rows > 0 else processed_rows,
                     )
+
+                    if file_record:
+                        # Store the persistent file path in the job record
+                        app_root = get_app_data_root()
+                        try:
+                            relative_output = str(Path(file_record["path"]))
+                        except Exception:
+                            relative_output = file_record["path"]
+
+                        job_service.mark_completed(
+                            job_id,
+                            output_file=relative_output,
+                            processed_rows=processed_rows if processed_rows > 0 else successful_rows,
+                        )
+                    else:
+                        # Fallback: store the job workspace path if finalization failed
+                        app_root = get_app_data_root()
+                        try:
+                            relative_output = str(output_csv_path.relative_to(app_root))
+                        except ValueError:
+                            relative_output = str(output_csv_path)
+
+                        job_service.mark_completed(
+                            job_id,
+                            output_file=relative_output,
+                            processed_rows=processed_rows if processed_rows > 0 else successful_rows,
+                        )
             else:
                 job = job_service.get_job(job_id)  # refresh
                 if job and job.get("status") == "cancelling":
