@@ -76,6 +76,39 @@ type Ctx = {
 const ScrapeContext = createContext<Ctx | null>(null);
 
 // ---------------------------------------------------------------------------
+// Standalone downloadFile (exported for direct use)
+// ---------------------------------------------------------------------------
+
+export async function downloadFile(file: ScrapedFile): Promise<void> {
+  try {
+    const url = `${API_BASE}/api/files/${file.id}/download`;
+    const res = await fetch(url);
+    if (!res.ok) {
+      throw new Error(`Download failed: ${res.status}`);
+    }
+    const disposition = res.headers.get("content-disposition");
+    let filename = file.name;
+    if (disposition) {
+      const match = disposition.match(/filename="?(.+)"?/);
+      if (match) filename = match[1];
+    }
+    const blob = await res.blob();
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+    toast.success(`Downloaded ${filename}`);
+  } catch (err: any) {
+    console.error("Download error:", err);
+    toast.error(err.message || "Download failed");
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -124,9 +157,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
   const [quota, setQuota] = useState<QuotaState | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  // ---- REMOVED localStorage for files ----
-  // No FILES_STORAGE_KEY, no useEffect for load/save.
-
   // ---- Backend health check ----
   useEffect(() => {
     let mounted = true;
@@ -173,9 +203,11 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         throw new Error(`Failed to fetch files: ${res.status} ${res.statusText}`);
       }
       const data = await res.json();
-      // Map backend records to ScrapedFile type
+      if (!Array.isArray(data)) {
+        throw new Error("Backend returned non-array response for /api/files");
+      }
       const mapped: ScrapedFile[] = data.map((item: any) => ({
-        id: String(item.id),           // backend uses integer id
+        id: String(item.id),
         name: item.filename,
         createdAt: new Date(item.created_at).getTime(),
         rows: item.row_count ?? 0,
@@ -183,37 +215,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       setFiles(mapped);
     } catch (err) {
       console.error("refreshFiles error:", err);
-      throw err;
-    }
-  }, []);
-
-  // ---- DOWNLOAD FILE (uses file_id) ----
-  const downloadFile = useCallback(async (file: ScrapedFile) => {
-    try {
-      const url = `${API_BASE}/api/files/${file.id}/download`;
-      const res = await fetch(url);
-      if (!res.ok) {
-        throw new Error(`Download failed: ${res.status}`);
-      }
-      // Get filename from Content-Disposition or fallback
-      const disposition = res.headers.get("content-disposition");
-      let filename = file.name;
-      if (disposition) {
-        const match = disposition.match(/filename="?(.+)"?/);
-        if (match) filename = match[1];
-      }
-      const blob = await res.blob();
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(blob);
-      link.download = filename;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
-      toast.success(`Downloaded ${filename}`);
-    } catch (err: any) {
-      console.error("Download error:", err);
-      toast.error(err.message || "Download failed");
       throw err;
     }
   }, []);
@@ -227,7 +228,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       if (!res.ok) {
         throw new Error(`Delete failed: ${res.status}`);
       }
-      // Re-fetch authoritative list from backend
       await refreshFiles();
       toast.success("File deleted");
     } catch (err: any) {
@@ -256,7 +256,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
 
           if (data.status === "completed") {
             stopPolling();
-            // ✅ Refresh files from backend (authoritative)
             try {
               await refreshFiles();
             } catch (err) {
@@ -280,7 +279,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
             refreshQuota();
           } else if (data.status === "cancelled") {
             stopPolling();
-            // ✅ Keep job in cancelled state and refresh files for partial output
             const processedRows = data.processed_rows ?? 0;
             setJob((prev) => ({
               ...prev,
@@ -290,7 +288,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
               outputFile: data.output_file ?? null,
               error: null,
             }));
-            // Refresh files to pick up any partial output
             try {
               await refreshFiles();
             } catch (err) {
@@ -300,7 +297,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
           } else if (data.status === "cancelling") {
             setJob((prev) => ({ ...prev, status: "cancelling" }));
           } else {
-            // Still running or created — update progress
             setJob((prev) => ({
               ...prev,
               done: data.processed_rows ?? prev.done,
@@ -434,7 +430,6 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       setJob((prev) => ({ ...prev, status: "cancelling" }));
       toast.info("Cancelling job...");
       refreshQuota();
-      // After cancellation, refresh files (if any partial output)
       try {
         await refreshFiles();
       } catch (err) {
@@ -446,11 +441,13 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     }
   }, [job.jobId, stopPolling, refreshQuota, resetJob, refreshFiles]);
 
-  // ---- Initial load: fetch files on mount ----
+  // ---- Initial load: fetch files on mount (client-only) ----
   useEffect(() => {
-    refreshFiles().catch((err) => {
-      console.warn("Initial files fetch failed:", err);
-    });
+    if (typeof window !== "undefined") {
+      refreshFiles().catch((err) => {
+        console.warn("Initial files fetch failed:", err);
+      });
+    }
   }, [refreshFiles]);
 
   // Cleanup polling on unmount
@@ -465,7 +462,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       startJob,
       cancelJob,
       deleteFile,
-      downloadFile,
+      downloadFile, // uses the standalone function
       refreshFiles,
       refreshQuota,
       resetJob,
@@ -489,7 +486,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
-// Hook
+// Hook (named export)
 // ---------------------------------------------------------------------------
 
 export function useScrape() {

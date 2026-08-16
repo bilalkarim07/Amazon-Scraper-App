@@ -37,12 +37,16 @@ function NotFoundComponent() {
   );
 }
 
+// ✅ IMPROVED ERROR COMPONENT – logs error and shows stack in dev
 function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
-  console.error(error);
+  console.error("TanStack Router error:", error);
   const router = useRouter();
   useEffect(() => {
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
   }, [error]);
+
+  // Show full error details in development
+  const isDev = import.meta.env.DEV;
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
@@ -53,6 +57,14 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
         <p className="mt-2 text-sm text-muted-foreground">
           Something went wrong on our end. You can try refreshing or head back home.
         </p>
+        {isDev && (
+          <div className="mt-4 rounded-md bg-destructive/10 p-4 text-left text-sm text-destructive">
+            <p className="font-semibold">Error details (development):</p>
+            <pre className="mt-2 overflow-auto text-xs whitespace-pre-wrap">
+              {error.stack || error.message}
+            </pre>
+          </div>
+        )}
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
             onClick={() => {
@@ -107,7 +119,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
   shellComponent: RootShell,
   component: RootComponent,
   notFoundComponent: NotFoundComponent,
-  errorComponent: ErrorComponent,
+  errorComponent: ErrorComponent, // ← improved error component
 });
 
 function RootShell({ children }: { children: ReactNode }) {
