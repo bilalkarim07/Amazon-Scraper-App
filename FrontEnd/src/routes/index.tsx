@@ -4,7 +4,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useMemo, useRef, useState, useEffect } from "react";
 import { CloudUpload, FileSpreadsheet, Loader2, Play, X, Check, AlertCircle, WifiOff, Download } from "lucide-react";
 import { toast } from "sonner";
-import { useScrape, downloadFile } from "../lib/scrape-store";
+import { useScrape } from "../lib/scrape-store";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -331,23 +331,17 @@ function ScrapeNew() {
     await cancelJob();
   };
 
-  // ---- Download handler ----
+  // ---- Download handler (fixed to use job UUID with new endpoint) ----
   const handleDownload = async () => {
     if (!job.jobId) {
       toast.error("No job ID available for download");
       return;
     }
     try {
-      const file: ScrapedFile = {
-        id: job.jobId,
-        name: job.outputFile ? job.outputFile.split(/[\\/]/).pop() ?? "output.csv" : "output.csv",
-        createdAt: Date.now(),
-        rows: job.done,
-      };
-      await downloadFile(file);
-      toast.success("Download started");
+      await downloadJobOutput(job.jobId);
+      // Success toast is handled inside downloadJobOutput
     } catch (err) {
-      toast.error("Failed to download output file");
+      // Error toast is already handled inside downloadJobOutput
       console.error(err);
     }
   };

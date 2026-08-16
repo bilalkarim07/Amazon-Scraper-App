@@ -1,7 +1,6 @@
+// FrontEnd/src/lib/scrape-store.tsx
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useRef,
@@ -9,6 +8,11 @@ import {
   type ReactNode,
 } from "react";
 import { toast } from "sonner";
+
+// Import context and hook from the separate module
+import { ScrapeContext, useScrape } from "./scrape-context";
+// Import download functions from their dedicated module
+import { downloadFile, downloadJobOutput } from "./download";
 
 const API_BASE =
   typeof window !== "undefined" && window.location.hostname === "127.0.0.1"
@@ -45,68 +49,6 @@ export type QuotaState = {
   remaining: number;
   date: string;
 };
-
-type Ctx = {
-  files: ScrapedFile[];
-  job: JobState;
-  backendOnline: boolean;
-  quota: QuotaState | null;
-  startJob: (opts: {
-    file: File;
-    sourceName: string;
-    rows: number;
-    column: string;
-    threads: number;
-    outputName: string;
-    firstPageWait?: number | undefined;
-    nextPageWait?: number | undefined;
-    keywords?: string[] | undefined;
-    marketplace: string;
-    currencyCode: string;
-    currencySymbol: string;
-  }) => Promise<void>;
-  cancelJob: () => Promise<void>;
-  deleteFile: (id: string) => Promise<void>;
-  downloadFile: (file: ScrapedFile) => Promise<void>;
-  refreshFiles: () => Promise<void>;
-  refreshQuota: () => Promise<void>;
-  resetJob: () => void;
-};
-
-const ScrapeContext = createContext<Ctx | null>(null);
-
-// ---------------------------------------------------------------------------
-// Standalone downloadFile (exported for direct use)
-// ---------------------------------------------------------------------------
-
-export async function downloadFile(file: ScrapedFile): Promise<void> {
-  try {
-    const url = `${API_BASE}/api/files/${file.id}/download`;
-    const res = await fetch(url);
-    if (!res.ok) {
-      throw new Error(`Download failed: ${res.status}`);
-    }
-    const disposition = res.headers.get("content-disposition");
-    let filename = file.name;
-    if (disposition) {
-      const match = disposition.match(/filename="?(.+)"?/);
-      if (match) filename = match[1];
-    }
-    const blob = await res.blob();
-    const link = document.createElement("a");
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
-    toast.success(`Downloaded ${filename}`);
-  } catch (err: any) {
-    console.error("Download error:", err);
-    toast.error(err.message || "Download failed");
-    throw err;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -326,7 +268,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
   }, [stopPolling]);
 
   // ---- startJob ----
-  const startJob: Ctx["startJob"] = useCallback(
+  const startJob = useCallback(
     async ({
       file,
       sourceName,
@@ -462,7 +404,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       startJob,
       cancelJob,
       deleteFile,
-      downloadFile, // uses the standalone function
+      downloadFile,
       refreshFiles,
       refreshQuota,
       resetJob,
@@ -486,11 +428,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
 }
 
 // ---------------------------------------------------------------------------
-// Hook (named export)
+// Re‑export the hook (so external imports stay the same)
 // ---------------------------------------------------------------------------
 
-export function useScrape() {
-  const ctx = useContext(ScrapeContext);
-  if (!ctx) throw new Error("useScrape must be used inside ScrapeProvider");
-  return ctx;
-}
+export { useScrape };

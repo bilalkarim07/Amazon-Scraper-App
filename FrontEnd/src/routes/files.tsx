@@ -14,6 +14,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { downloadFile } from "../lib/download";
 
 export const Route = createFileRoute("/files")({
   head: () => ({
