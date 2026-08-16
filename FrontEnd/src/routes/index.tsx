@@ -5,6 +5,7 @@ import { useMemo, useRef, useState, useEffect } from "react";
 import { CloudUpload, FileSpreadsheet, Loader2, Play, X, Check, AlertCircle, WifiOff, Download } from "lucide-react";
 import { toast } from "sonner";
 import { useScrape } from "../lib/scrape-store";
+import { downloadJobOutput } from "../lib/download";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -341,7 +342,7 @@ function ScrapeNew() {
       await downloadJobOutput(job.jobId);
       // Success toast is handled inside downloadJobOutput
     } catch (err) {
-      // Error toast is already handled inside downloadJobOutput
+      toast.error("Failed to download output file");
       console.error(err);
     }
   };
