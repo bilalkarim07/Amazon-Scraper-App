@@ -1,109 +1,225 @@
 """ quota_service.py — Persistent daily scraping quota management. """
 from __future__ import annotations
-from datetime import date, datetime
+from datetime import datetime, timedelta, timezone
 from typing import Optional
+import logging
+
 from application.database import get_connection
 from application.config import DAILY_QUOTA_LIMIT
 
+logger = logging.getLogger(__name__)
 
-def get_quota() -> dict:
-    """Get current quota status."""
+
+def _now_utc_iso() -> str:
+    """Return current UTC time as ISO-8601 string."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_iso_to_utc(iso_str: str) -> datetime:
+    """Parse ISO-8601 string to timezone-aware UTC datetime."""
+    if iso_str is None:
+        return datetime.now(timezone.utc)
+    # Handle SQLite's default format: YYYY-MM-DD HH:MM:SS
+    try:
+        dt = datetime.fromisoformat(iso_str)
+    except ValueError:
+        # Try SQLite format
+        dt = datetime.strptime(iso_str, "%Y-%m-%d %H:%M:%S")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def check_and_reset_quota() -> dict:
+    """
+    Central authoritative quota maintenance function.
+
+    Checks if the 24-hour window has expired. If so, resets used=0 and updates
+    window_started_at. Returns the current quota row as a dict.
+
+    This function is safe to call from within an existing transaction.
+    """
     with get_connection() as conn:
-        row = conn.execute(
-            "SELECT daily_limit, used, quota_date, last_updated FROM quota WHERE id = 1"
-        ).fetchone()
+        # Use BEGIN IMMEDIATE if not already in a transaction
+        # SQLite allows nested BEGIN if we check, but we'll just execute
+        # If already in a transaction, this is a no-op.
+        conn.execute("BEGIN IMMEDIATE")
+
+        row = conn.execute("""
+            SELECT id, daily_limit, used, reserved, quota_date, window_started_at, last_updated
+            FROM quota WHERE id = 1
+        """).fetchone()
+
         if not row:
             # Initialize if missing
-            today = date.today().isoformat()
-            conn.execute(
-                "INSERT INTO quota (id, daily_limit, used, quota_date) VALUES (1, ?, 0, ?)",
-                (DAILY_QUOTA_LIMIT, today)
-            )
+            now_utc = _now_utc_iso()
+            today = datetime.now(timezone.utc).date().isoformat()
+            conn.execute("""
+                INSERT INTO quota (id, daily_limit, used, reserved, quota_date, window_started_at)
+                VALUES (1, ?, 0, 0, ?, ?)
+            """, (DAILY_QUOTA_LIMIT, today, now_utc))
             conn.commit()
-            row = conn.execute(
-                "SELECT daily_limit, used, quota_date, last_updated FROM quota WHERE id = 1"
-            ).fetchone()
-        
-        today = date.today().isoformat()
-        used = row["used"]
-        quota_date = row["quota_date"]
-        
-        # Reset if new day
-        if quota_date != today:
-            used = 0
-            conn.execute(
-                "UPDATE quota SET used = 0, quota_date = ?, last_updated = CURRENT_TIMESTAMP WHERE id = 1",
-                (today,)
-            )
+            row = conn.execute("SELECT * FROM quota WHERE id = 1").fetchone()
+
+        # Check expiration
+        window_start = _parse_iso_to_utc(row["window_started_at"])
+        now = datetime.now(timezone.utc)
+        elapsed = now - window_start
+
+        if elapsed >= timedelta(hours=24):
+            # Window expired → reset
+            new_window_start = _now_utc_iso()
+            conn.execute("""
+                UPDATE quota
+                SET used = 0,
+                    window_started_at = ?,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (new_window_start,))
             conn.commit()
-        
-        return {
-            "daily_limit": row["daily_limit"],
-            "used": used,
-            "remaining": row["daily_limit"] - used,
-            "quota_date": today,
-            "last_updated": row["last_updated"]
-        }
+
+            logger.info(
+                "[QUOTA] Quota window expired (%.1f hours ago); resetting usage to 0",
+                elapsed.total_seconds() / 3600.0
+            )
+
+            # Re-fetch updated row
+            row = conn.execute("SELECT * FROM quota WHERE id = 1").fetchone()
+        else:
+            remaining_hours = 24 - elapsed.total_seconds() / 3600.0
+            logger.debug(
+                "[QUOTA] Window active: %.1f hours remaining",
+                remaining_hours
+            )
+
+        return dict(row)
+
+
+def get_quota() -> dict:
+    """Get current quota status, ensuring window is current."""
+    quota_row = check_and_reset_quota()
+
+    return {
+        "daily_limit": quota_row["daily_limit"],
+        "used": quota_row["used"],
+        "remaining": quota_row["daily_limit"] - quota_row["used"],
+        "quota_date": datetime.now(timezone.utc).date().isoformat(),
+        "last_updated": quota_row["last_updated"],
+        "window_started_at": quota_row["window_started_at"],
+        "reserved": quota_row.get("reserved", 0),
+    }
 
 
 def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
     """
     Atomically reserve quota for a job.
+
+    This is the critical atomic operation:
+    - BEGIN IMMEDIATE
+    - Check/reset expired window
+    - Validate remaining quota
+    - Reserve requested rows
+    - COMMIT
+
     Returns (success, error_message).
     """
     if requested_rows <= 0:
         return False, "Requested rows must be greater than 0"
-    
+
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        
-        # Get current quota
-        row = conn.execute(
-            "SELECT daily_limit, used, quota_date FROM quota WHERE id = 1"
-        ).fetchone()
-        
-        today = date.today().isoformat()
-        used = row["used"]
+
+        # 1. Ensure quota window is current (reset if expired)
+        # We need to read the row, check expiration, and update if needed.
+        row = conn.execute("""
+            SELECT id, daily_limit, used, reserved, window_started_at
+            FROM quota WHERE id = 1
+        """).fetchone()
+
+        if not row:
+            now_utc = _now_utc_iso()
+            today = datetime.now(timezone.utc).date().isoformat()
+            conn.execute("""
+                INSERT INTO quota (id, daily_limit, used, reserved, quota_date, window_started_at)
+                VALUES (1, ?, 0, 0, ?, ?)
+            """, (DAILY_QUOTA_LIMIT, today, now_utc))
+            conn.commit()
+            row = conn.execute("""
+                SELECT id, daily_limit, used, reserved, window_started_at
+                FROM quota WHERE id = 1
+            """).fetchone()
+
+        # 2. Check expiration
+        window_start = _parse_iso_to_utc(row["window_started_at"])
+        now = datetime.now(timezone.utc)
+        elapsed = now - window_start
+
+        if elapsed >= timedelta(hours=24):
+            # Reset
+            new_window_start = _now_utc_iso()
+            conn.execute("""
+                UPDATE quota
+                SET used = 0,
+                    window_started_at = ?,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (new_window_start,))
+            # Re-fetch
+            row = conn.execute("""
+                SELECT id, daily_limit, used, reserved, window_started_at
+                FROM quota WHERE id = 1
+            """).fetchone()
+            logger.info("[QUOTA] Quota window expired; reset during reservation")
+
         daily_limit = row["daily_limit"]
-        
-        # Reset if new day
-        if row["quota_date"] != today:
-            used = 0
-            conn.execute(
-                "UPDATE quota SET used = 0, quota_date = ? WHERE id = 1",
-                (today,)
-            )
-        
-        # Check if enough quota remains
+        used = row["used"]
+        reserved = row["reserved"]   # column exists, access directly 
+
+        # 3. Calculate remaining quota
+        # IMPORTANT: The existing system uses `used` as the reservation counter.
+        # `reserved` exists in the schema but is not actively used.
+        # We preserve this behavior.
         remaining = daily_limit - used
+
         if requested_rows > remaining:
             conn.rollback()
-            return False, f"Quota exceeded. Daily limit: {daily_limit}, Used: {used}, Remaining: {remaining}, Requested: {requested_rows}"
-        
-        # Reserve the quota
-        conn.execute(
-            "UPDATE quota SET used = used + ?, last_updated = CURRENT_TIMESTAMP WHERE id = 1",
-            (requested_rows,)
-        )
+            logger.warning(
+                "[QUOTA] Quota exceeded: limit=%d, used=%d, requested=%d",
+                daily_limit, used, requested_rows
+            )
+            return False, (
+                f"Quota exceeded. Daily limit: {daily_limit}, "
+                f"Used: {used}, Remaining: {remaining}, Requested: {requested_rows}"
+            )
+
+        # 4. Reserve the quota
+        conn.execute("""
+            UPDATE quota
+            SET used = used + ?,
+                last_updated = CURRENT_TIMESTAMP
+            WHERE id = 1
+        """, (requested_rows,))
+
         conn.commit()
+        logger.info("[QUOTA] Reserved %d rows (used=%d, remaining=%d)",
+                    requested_rows, used + requested_rows, remaining - requested_rows)
         return True, None
 
 
 def release_quota(rows_to_release: int) -> None:
-    """
-    Release unused quota after job completion.
-    Called with (requested_rows - actual_processed).
-    """
+    """Release unused quota after job completion."""
     if rows_to_release <= 0:
         return
-    
+
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        conn.execute(
-            "UPDATE quota SET used = used - ? WHERE id = 1 AND used >= ?",
-            (rows_to_release, rows_to_release)
-        )
+        conn.execute("""
+            UPDATE quota
+            SET used = used - ?
+            WHERE id = 1 AND used >= ?
+        """, (rows_to_release, rows_to_release))
         conn.commit()
+        logger.info("[QUOTA] Released %d unused rows", rows_to_release)
 
 
 def get_quota_for_frontend() -> dict:
@@ -113,8 +229,10 @@ def get_quota_for_frontend() -> dict:
         "limit": quota["daily_limit"],
         "used": quota["used"],
         "remaining": quota["remaining"],
-        "date": quota["quota_date"]
+        "date": quota["quota_date"],
+        "window_started_at": quota["window_started_at"],  # Optional extra field
     }
+
 
 def consume_quota(rows_to_consume: int) -> bool:
     """
@@ -128,36 +246,38 @@ def consume_quota(rows_to_consume: int) -> bool:
 
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
-        row = conn.execute(
-            "SELECT daily_limit, used, quota_date FROM quota WHERE id = 1"
-        ).fetchone()
 
-        today = date.today().isoformat()
-        used = row["used"]
+        # Ensure window is current
+        row = conn.execute("""
+            SELECT daily_limit, used, window_started_at
+            FROM quota WHERE id = 1
+        """).fetchone()
+
+        window_start = _parse_iso_to_utc(row["window_started_at"])
+        now = datetime.now(timezone.utc)
+        if now - window_start >= timedelta(hours=24):
+            new_window_start = _now_utc_iso()
+            conn.execute("""
+                UPDATE quota
+                SET used = 0,
+                    window_started_at = ?,
+                    last_updated = CURRENT_TIMESTAMP
+                WHERE id = 1
+            """, (new_window_start,))
+            row = conn.execute("SELECT daily_limit, used FROM quota WHERE id = 1").fetchone()
+
         daily_limit = row["daily_limit"]
-
-        # Reset if new day
-        if row["quota_date"] != today:
-            used = 0
-            conn.execute(
-                "UPDATE quota SET used = 0, quota_date = ? WHERE id = 1",
-                (today,)
-            )
-
+        used = row["used"]
         remaining = daily_limit - used
+
         if rows_to_consume > remaining:
             conn.rollback()
             return False
 
-        conn.execute(
-            "UPDATE quota SET used = used + ? WHERE id = 1",
-            (rows_to_consume,)
-        )
+        conn.execute("UPDATE quota SET used = used + ? WHERE id = 1", (rows_to_consume,))
         conn.commit()
         return True
 
-
-# --- Phase 1 integration methods ---
 
 def settle_quota(job_id: str, requested_rows: int, successful_rows: int) -> None:
     """
@@ -166,12 +286,12 @@ def settle_quota(job_id: str, requested_rows: int, successful_rows: int) -> None
     """
     if requested_rows <= 0:
         return
-
     successful_rows = max(0, min(successful_rows, requested_rows))
     unused_rows = requested_rows - successful_rows
-
     if unused_rows > 0:
         release_quota(unused_rows)
+        logger.info("[QUOTA] Settled job %s: requested=%d, successful=%d, released=%d",
+                    job_id, requested_rows, successful_rows, unused_rows)
 
 
 def release_reserved(job_id: str, requested_rows: int) -> None:
@@ -179,3 +299,5 @@ def release_reserved(job_id: str, requested_rows: int) -> None:
     if requested_rows <= 0:
         return
     release_quota(requested_rows)
+    logger.info("[QUOTA] Released all reserved quota for failed job %s: %d rows",
+                job_id, requested_rows)

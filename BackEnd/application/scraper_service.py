@@ -149,7 +149,10 @@ def _run_engine(
     currency_code: str,
     currency_symbol: str,
 ) -> None:
-    """Run the ScraperEngine subprocess, then settle quota based on successful rows."""
+    """
+    Run the ScraperEngine subprocess, then settle quota based on successful rows.
+    Quota is reconciled using the number of valid successful rows (excluding timeouts and failures).
+    """
     job_service.mark_running(job_id)
 
     cmd = [
@@ -214,7 +217,15 @@ def _run_engine(
                                     if current and current.get("total_rows", 0) == 0:
                                         job_service.update_job(job_id, total_rows=total)
                             elif event.get("event") == "completed":
+                                # Extract success count (timeouts and failures are excluded)
                                 successful_rows = event.get("successful", 0)
+                                # Optional: also capture timeout/failure counts for logging
+                                timeout_count = event.get("timeout", 0)
+                                failure_count = event.get("failure", 0)
+                                logging.info(
+                                    f"Engine completed: success={successful_rows}, "
+                                    f"timeout={timeout_count}, failure={failure_count}"
+                                )
                                 processed = event.get("processed", 0)
                                 job_service.update_progress(job_id, processed)
                             elif event.get("event") == "failed":
@@ -263,31 +274,31 @@ def _run_engine(
                         output_filename=output_csv_path.name,
                         status="partial",
                         row_count=successful_rows,
-                        base_name=output_csv_path.name,   # <--- FIX: user‑provided name
+                        base_name=output_csv_path.name,
                     )
                     if file_record:
-                        # Store the persistent file path in the job record
                         app_root = get_app_data_root()
                         try:
                             relative_output = str(Path(file_record["path"]))
                         except Exception:
                             relative_output = file_record["path"]
-                        # Update the job's output_file to point to the persistent file
                         job_service.update_job(job_id, output_file=relative_output)
 
                 # --- Settle quota for cancelled job ---
                 if requested_rows > 0:
                     try:
+                        # This releases unused reserved quota and updates quota_used
                         quota_service.settle_quota(job_id, requested_rows, successful_rows)
                     except Exception as exc:
                         logging.error(f"Quota settlement failed for cancelled job {job_id}: {exc}")
 
-                # Mark as cancelled with actual processed count
                 job_service.mark_cancelled(job_id, successful_rows)
                 return
 
             # --- Normal completion path ---
             # --- SETTLE QUOTA (idempotent) with error handling ---
+            # quota_service.settle_quota handles releasing unused reserved quota
+            # and updating the job's quota_used and quota_settled fields.
             quota_failed = False
             quota_error = None
             if requested_rows > 0:
@@ -315,11 +326,10 @@ def _run_engine(
                         output_filename=output_csv_path.name,
                         status="final",
                         row_count=successful_rows if successful_rows > 0 else processed_rows,
-                        base_name=output_csv_path.name,   # <--- FIX: user‑provided name
+                        base_name=output_csv_path.name,
                     )
 
                     if file_record:
-                        # Store the persistent file path in the job record
                         app_root = get_app_data_root()
                         try:
                             relative_output = str(Path(file_record["path"]))
@@ -373,7 +383,6 @@ def _run_engine(
                 quota_service.release_reserved(job_id, requested)
             except Exception as quota_exc:
                 logging.error(f"Failed to release reserved quota for job {job_id}: {quota_exc}")
-                # Append quota error to the main error for visibility
                 exc = Exception(f"{exc} (quota release failed: {quota_exc})")
         job_service.mark_failed(job_id, str(exc))
 
@@ -393,7 +402,6 @@ def cancel_job(job_id: str) -> bool:
 
     job_service.mark_cancelling(job_id)
 
-    # Use centralized Jobs directory
     jobs_root = get_jobs_dir()
     job_dir = jobs_root / job_id
     cancel_file = job_dir / ".cancel"
@@ -416,6 +424,4 @@ def cancel_job(job_id: str) -> bool:
         except Exception as e:
             logging.warning(f"Error terminating subprocess for job {job_id}: {e}")
 
-    # After cancellation, the engine will exit and _run_engine will settle quota.
-    # No immediate quota action here.
     return True

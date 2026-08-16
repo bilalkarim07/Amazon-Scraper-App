@@ -31,6 +31,7 @@ export type ScrapedFile = {
   name: string;
   createdAt: number;   // timestamp in ms
   rows: number;
+  note?: string;       // 👈 NEW: user-provided note for the file
 };
 
 export type JobState = {
@@ -153,6 +154,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         name: item.filename,
         createdAt: new Date(item.created_at).getTime(),
         rows: item.row_count ?? 0,
+        note: item.note ?? undefined,  // 👈 map note from backend
       }));
       setFiles(mapped);
     } catch (err) {
@@ -175,6 +177,27 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     } catch (err: any) {
       console.error("Delete error:", err);
       toast.error(err.message || "Delete failed");
+      throw err;
+    }
+  }, [refreshFiles]);
+
+  // ---- UPDATE FILE NOTE ----
+  const updateFileNote = useCallback(async (id: string, note: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/api/files/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ note }),
+      });
+      if (!res.ok) {
+        throw new Error(`Update failed: ${res.status}`);
+      }
+      // Refresh the file list to show the updated note
+      await refreshFiles();
+      toast.success("Note saved");
+    } catch (err: any) {
+      console.error("Update note error:", err);
+      toast.error(err.message || "Failed to save note");
       throw err;
     }
   }, [refreshFiles]);
@@ -408,6 +431,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       refreshFiles,
       refreshQuota,
       resetJob,
+      updateFileNote,  // 👈 NEW: expose the note update function
     }),
     [
       files,
@@ -421,6 +445,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       refreshFiles,
       refreshQuota,
       resetJob,
+      updateFileNote,
     ]
   );
 

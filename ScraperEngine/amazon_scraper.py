@@ -23,6 +23,7 @@ class AmazonScraper:
         base_url: str = "https://www.amazon.com/",
         currency_code: str = "USD",
         currency_symbol: str = "$",
+        url_timeout: int = 60,  # NEW: per‑URL timeout in seconds
     ):
         self.listings = listings
         self.max_threads = min(max(1, max_threads), 5)
@@ -32,6 +33,9 @@ class AmazonScraper:
         self.base_url = base_url
         self.currency_code = currency_code
         self.currency_symbol = currency_symbol
+
+        # NEW: store the per‑URL timeout
+        self.url_timeout = url_timeout
 
         if workspace_dir:
             self.thread_folder = os.path.join(workspace_dir, "workspace")
@@ -142,11 +146,16 @@ class AmazonScraper:
         first_page_wait: int = 150,
         next_page_wait: int = 5,
         headless: bool = False,
-        cancel_check: Optional[Callable[[], bool]] = None
+        cancel_check: Optional[Callable[[], bool]] = None,
+        url_timeout: Optional[int] = None,  # NEW: optional override
     ) -> str:
         logger.info("=" * 60)
         logger.info("STARTING AMAZON PRODUCT EXTRACTION")
         logger.info("=" * 60)
+
+        # Use the provided timeout or fall back to the instance default
+        timeout = url_timeout if url_timeout is not None else self.url_timeout
+        logger.info(f"Per‑URL timeout set to {timeout} seconds")
 
         urls = self._load_urls()
         total_urls = len(urls)
@@ -169,15 +178,17 @@ class AmazonScraper:
             with exception_lock:
                 worker_exceptions.append(exc)
 
-        # --- Worker result aggregation ---
+        # --- Worker result aggregation (now includes timeout) ---
         total_success = 0
+        total_timeout = 0
         total_failed = 0
         results_lock = threading.Lock()
 
-        def record_worker_result(success: int, failed: int):
-            nonlocal total_success, total_failed
+        def record_worker_result(success: int, timeout: int, failed: int):
+            nonlocal total_success, total_timeout, total_failed
             with results_lock:
                 total_success += success
+                total_timeout += timeout
                 total_failed += failed
 
         threads = []
@@ -196,7 +207,8 @@ class AmazonScraper:
                 cancel_check=cancel_check,
                 base_url=self.base_url,
                 exception_callback=record_exception,
-                result_callback=record_worker_result,
+                result_callback=record_worker_result,  # now expects 3 args
+                url_timeout=timeout,  # NEW: pass the timeout to each worker
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
@@ -217,12 +229,13 @@ class AmazonScraper:
             progress_reporter.emit_failed(error_msg)
             raise RuntimeError(error_msg)
 
-        # --- Emit final aggregated completed event ---
-        # REPLACED: emit_final_completed with emit_completed_with_counts
-        progress_reporter.emit_completed_with_counts(
+        # --- Emit final aggregated completed event with all counts ---
+        # The progress_reporter now supports timeout_count; we emit all three
+        progress_reporter.emit_completed(
+            total=total_urls,
             success=total_success,
-            failed=total_failed,
-            total=total_urls
+            timeout=total_timeout,
+            failure=total_failed
         )
 
         self._merge_results(output_file)
@@ -233,6 +246,7 @@ class AmazonScraper:
 
         logger.info("=" * 60)
         logger.info("EXTRACTION COMPLETED SUCCESSFULLY")
+        logger.info(f"Summary: Success={total_success}, Timeout={total_timeout}, Failed={total_failed}")
         logger.info("=" * 60)
 
         return output_file
@@ -278,6 +292,7 @@ class AmazonScraper:
         base_url: Optional[str] = None,
         currency_code: Optional[str] = None,
         currency_symbol: Optional[str] = None,
+        url_timeout: Optional[int] = None,  # NEW: allow override from caller
     ) -> str:
         final_marketplace = marketplace if marketplace is not None else self.marketplace
         final_base_url = base_url if base_url is not None else self.base_url
@@ -286,11 +301,13 @@ class AmazonScraper:
 
         final_price_symbol = price_symbol if price_symbol is not None else final_currency_symbol
         final_base_append = base_append if base_append is not None else final_base_url
+        final_timeout = url_timeout if url_timeout is not None else self.url_timeout
 
         logger.info("=" * 60)
         logger.info("STARTING COMBINED EXTRACT + PROCESS WORKFLOW")
         logger.info(f"Marketplace: {final_marketplace}, Base URL: {final_base_url}")
         logger.info(f"Currency: {final_currency_code} ({final_currency_symbol})")
+        logger.info(f"Per‑URL timeout: {final_timeout}s")
         logger.info("=" * 60)
 
         temp_extract_file = self._temp_extract_file
@@ -300,6 +317,7 @@ class AmazonScraper:
             next_page_wait=next_page_wait,
             headless=headless,
             cancel_check=cancel_check,
+            url_timeout=final_timeout,  # pass the timeout down
         )
 
         self.process(

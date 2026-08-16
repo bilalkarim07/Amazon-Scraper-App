@@ -1,5 +1,11 @@
 import { Link } from "@tanstack/react-router";
-import { FilePlus2, Files, ShieldCheck, ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  FilePlus2,
+  Files,
+  ShieldCheck,
+  ChevronLeft,
+  ChevronRight,
+} from "lucide-react";
 import { useState, useEffect, useRef } from "react";
 
 const items = [
@@ -68,18 +74,23 @@ export function AppSidebar() {
 
   const handleNameBlur = () => {
     setIsEditing(false);
-    if (!userName.trim()) setUserName("User");
+
+    if (!userName.trim()) {
+      setUserName("User");
+    }
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       setIsEditing(false);
-      if (!userName.trim()) setUserName("User");
+
+      if (!userName.trim()) {
+        setUserName("User");
+      }
     }
+
     if (e.key === "Escape") {
       setIsEditing(false);
-      // revert? we could keep the current value; maybe just close without saving
-      // but we already saved on each change, so it's fine.
     }
   };
 
@@ -91,12 +102,13 @@ export function AppSidebar() {
         collapsed ? "w-16" : "w-60"
       }`}
     >
-      {/* Brand / Logo */}
-      <div className={`mb-8 flex items-center gap-2 px-2 ${collapsed ? "justify-center" : ""}`}>
-        <span className="grid h-9 w-9 place-items-center rounded-xl border-2 bg-primary font-display text-lg font-bold text-primary-foreground">
-          {initial}
-        </span>
-        {!collapsed && (
+      {/* Brand / Logo - hidden when sidebar is collapsed */}
+      {!collapsed && (
+        <div className="mb-8 flex items-center gap-2 px-2">
+          <span className="grid h-9 w-9 place-items-center rounded-xl border-2 bg-primary font-display text-lg font-bold text-primary-foreground">
+            {initial}
+          </span>
+
           <div className="font-display text-lg font-semibold leading-tight">
             {isEditing ? (
               <input
@@ -112,31 +124,31 @@ export function AppSidebar() {
             ) : (
               <span
                 onClick={handleNameClick}
-                className="cursor-pointer hover:bg-accent/20 px-1 rounded"
+                className="cursor-pointer rounded px-1 hover:bg-accent/20"
               >
                 {userName || "User"}
               </span>
             )}
           </div>
-        )}
-      </div>
+        </div>
+      )}
 
-      {/* Navigation Items - completely hidden when collapsed */}
+      {/* Navigation Items - hidden when collapsed */}
       {items.map(({ to, label, icon: Icon }) => (
         <Link
           key={to}
           to={to}
           activeOptions={{ exact: to === "/" }}
           className={`group flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-semibold text-sidebar-foreground transition-all hover:translate-x-0.5 hover:bg-sidebar-accent data-[status=active]:border-2 data-[status=active]:bg-primary data-[status=active]:shadow-[2px_2px_0_0_var(--ink)] ${
-            collapsed ? "justify-center" : ""
+            collapsed ? "hidden" : ""
           }`}
         >
-          {!collapsed && <Icon className="h-4 w-4 shrink-0" />}
-          {!collapsed && <span>{label}</span>}
+          <Icon className="h-4 w-4 shrink-0" />
+          <span>{label}</span>
         </Link>
       ))}
 
-      {/* Toggle button at the bottom */}
+      {/* Toggle button - KEEP VISIBLE WHEN COLLAPSED */}
       <div className="mt-auto">
         <button
           onClick={toggle}
@@ -145,7 +157,11 @@ export function AppSidebar() {
           }`}
           aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
         >
-          {collapsed ? <ChevronRight className="h-4 w-4" /> : <ChevronLeft className="h-4 w-4" />}
+          {collapsed ? (
+            <ChevronRight className="h-4 w-4" />
+          ) : (
+            <ChevronLeft className="h-4 w-4" />
+          )}
         </button>
       </div>
     </aside>

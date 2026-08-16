@@ -245,7 +245,7 @@ def extract_variation_asins(source, base_url="https://www.amazon.com"):
 # Main Scraping Function with Timeout and Cancellation Support
 # ============================================================================
 
-def scrape_product(driver, url: str, wait: int = 150, cancel_check=None) -> ProductData:
+def scrape_product(driver, url: str, wait: int = 150, cancel_check=None, **kwargs) -> ProductData:
     """
     Scrape a single Amazon product page and return a ProductData object.
     
@@ -254,40 +254,43 @@ def scrape_product(driver, url: str, wait: int = 150, cancel_check=None) -> Prod
         url: Product URL to scrape
         wait: Wait time in seconds before starting extraction
         cancel_check: Optional callable that returns True if cancellation requested
+        url_timeout: Maximum time allowed for the entire URL processing (default 60)
     
     Returns:
         ProductData: Structured product data object
     """
     url = safe_str(url, default="Not Mentioned")
+    url_timeout = kwargs.get('url_timeout', 60)
     try:
-        return _scrape_product_page(driver, url, wait, cancel_check)
+        return _scrape_product_page(driver, url, wait, cancel_check, url_timeout)
     except Exception as e:
         logger.error(f"scrape_product failed for {url}: {e}")
         return ProductData.create_fallback(url=url, error=str(e))
 
 
-def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> ProductData:
+def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_timeout: int = 60) -> ProductData:
     """
     Internal scrape implementation; callers should use scrape_product().
     """
     # --- Diagnostic logging ---
     logger.info(f"[worker] Starting URL: {url}")
 
-    # Set page load timeout to prevent indefinite blocking
-    driver.set_page_load_timeout(60)  # 60 seconds max for page load
-    driver.set_script_timeout(10)     # 10 seconds max for JavaScript execution
+    # Set page load and script timeouts using the provided url_timeout
+    driver.set_page_load_timeout(url_timeout)  # Use the passed timeout
+    driver.set_script_timeout(url_timeout)     # Same timeout for scripts
 
     # --- Navigation ---
     logger.info("[worker] Calling driver.get()")
     try:
         driver.get(url)
         logger.info("[worker] driver.get() returned")
-    except TimeoutException:
-        logger.error(f"[worker] Page load timed out after 60s: {url}")
-        raise RuntimeError(f"Page load timeout after 60 seconds: {url}")
+    except TimeoutException as e:
+        logger.error(f"[worker] Page load timed out after {url_timeout}s: {url}")
+        # Re-raise the TimeoutException so the worker can handle it
+        raise
     except WebDriverException as e:
         logger.error(f"[worker] WebDriver error during navigation: {e}")
-        raise RuntimeError(f"WebDriver error loading page: {e}")
+        raise RuntimeError(f"WebDriver error loading page: {e}") from e
     except Exception as e:
         logger.error(f"[worker] Unexpected error during navigation: {e}")
         raise RuntimeError(f"Could not load page: {e}") from e
@@ -395,8 +398,8 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None) -> Prod
             logger.info("[worker] extraction: attempting to click toggle - START")
             try:
                 # Wait for the toggle to be clickable
-                wait = WebDriverWait(driver, 10)
-                clickable_toggle = wait.until(EC.element_to_be_clickable(toggle_anchor))
+                wait_obj = WebDriverWait(driver, 10)
+                clickable_toggle = wait_obj.until(EC.element_to_be_clickable(toggle_anchor))
                 driver.execute_script("arguments[0].click();", clickable_toggle)
                 logger.info("[worker] extraction: toggle clicked successfully")
                 time.sleep(1)  # Brief pause for content to load

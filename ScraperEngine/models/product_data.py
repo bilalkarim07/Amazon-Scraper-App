@@ -102,17 +102,28 @@ class ProductData:
     comments: str = "Not Mentioned"
     variations: str = "Not Mentioned"
     availability: str = "Not Mentioned"
-
-    is_fallback = False 
+    
+    # Status flags (NEW: is_timeout added)
+    is_fallback: bool = False
+    is_timeout: bool = False
     
     # Keyword Information - structured as list of KeywordInformation objects
     keyword_information: List[KeywordInformation] = field(default_factory=list)
     raw_keyword_column: str = "Not Mentioned"
     
     @classmethod
-    def create_fallback(cls, url: str = "Not Mentioned", error: Optional[str] = None) -> 'ProductData':
-        """Return a minimal ProductData instance when scraping or parsing fails."""
+    def create_fallback(cls, url: str = "Not Mentioned", error: Optional[str] = None, is_timeout: bool = False) -> 'ProductData':
+        """
+        Return a minimal ProductData instance when scraping or parsing fails.
+        
+        Args:
+            url: The product URL
+            error: Optional error message to store in comments
+            is_timeout: Whether this fallback is due to a timeout (default False)
+        """
         instance = cls(product_link=safe_str(url))
+        instance.is_fallback = True
+        instance.is_timeout = is_timeout
         if error:
             instance.comments = f"Scrape error: {safe_str(error, default='Unknown error')}"
         return instance
@@ -297,9 +308,3 @@ class ProductData:
             return f"Product: {safe_str(self.title)} (ASIN: {safe_str(self.asin)})"
         except Exception:
             return "Product: <unavailable>"
-    
-    @classmethod
-    def create_fallback(cls, url: str, error: str):
-        instance = cls(...)
-        instance.is_fallback = True
-        return instance

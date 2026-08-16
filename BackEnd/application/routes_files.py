@@ -4,7 +4,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, HTTPException, Query, status
+from fastapi import APIRouter, HTTPException, Query, status, Body
 from fastapi.responses import FileResponse
 from typing import Optional, List
 
@@ -91,19 +91,20 @@ async def download_file(file_id: int):
 @router.patch(
     "/api/files/{file_id}",
     tags=["Files"],
-    summary="Update file metadata (e.g., rename)",
+    summary="Update file metadata (e.g., rename, add note)",
 )
 async def update_file_metadata(
     file_id: int,
-    filename: Optional[str] = None,
-    marketplace: Optional[str] = None,
-    currency_code: Optional[str] = None,
-    source_filename: Optional[str] = None,
+    filename: Optional[str] = Body(None),
+    marketplace: Optional[str] = Body(None),
+    currency_code: Optional[str] = Body(None),
+    source_filename: Optional[str] = Body(None),
+    note: Optional[str] = Body(None),
 ):
     """
     Update file metadata.
 
-    Supported updates: filename, marketplace, currency_code, source_filename.
+    Supported updates: filename, marketplace, currency_code, source_filename, note.
     When renaming, the physical file is also renamed.
     """
     # Build update fields
@@ -116,6 +117,8 @@ async def update_file_metadata(
         fields["currency_code"] = currency_code
     if source_filename is not None:
         fields["source_filename"] = source_filename
+    if note is not None:
+        fields["note"] = note
 
     if not fields:
         raise HTTPException(

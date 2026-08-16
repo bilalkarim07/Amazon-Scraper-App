@@ -7,6 +7,14 @@ import { toast } from "sonner";
 import { useScrape } from "../lib/scrape-store";
 import { downloadJobOutput } from "../lib/download";
 
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+
 export const Route = createFileRoute("/")({
   head: () => ({
     meta: [
@@ -48,7 +56,6 @@ const API_BASE =
     ? "http://127.0.0.1:8000"
     : "http://localhost:8000";
 
-// ---- FALLBACK marketplaces (used if backend is not ready) ----
 const FALLBACK_MARKETPLACES: Record<string, any> = {
   US: { label: "United States", domain: "amazon.com", currency_code: "USD", currency_symbol: "$" },
   UK: { label: "United Kingdom", domain: "amazon.co.uk", currency_code: "GBP", currency_symbol: "£" },
@@ -84,14 +91,12 @@ const FALLBACK_MARKETPLACES: Record<string, any> = {
 function ScrapeNew() {
   const { files, job, backendOnline, startJob, cancelJob, quota, refreshQuota, resetJob } = useScrape();
 
-  // ---- Marketplace state ----
   const [marketplaces, setMarketplaces] = useState<Record<string, any>>({});
   const [loadingMarketplaces, setLoadingMarketplaces] = useState(true);
   const [marketplace, setMarketplace] = useState("US");
   const [currencyCode, setCurrencyCode] = useState("USD");
   const [currencySymbol, setCurrencySymbol] = useState("$");
 
-  // ---- File & form state ----
   const [fileInfo, setFileInfo] = useState<{ name: string; rows: number; raw: File } | null>(null);
   const [column, setColumn] = useState("Links");
   const [threads, setThreads] = useState("3");
@@ -110,7 +115,6 @@ function ScrapeNew() {
   const pct = job.total ? Math.round((job.done / job.total) * 100) : 0;
   const isCancelling = job.status === "cancelling";
 
-  // ---- Reset form (for "Scrape Another") ----
   const resetScrapeForm = () => {
     resetJob();
     setFileInfo(null);
@@ -123,7 +127,6 @@ function ScrapeNew() {
     }
   };
 
-  // ---- Fetch marketplace config (with fallback) ----
   useEffect(() => {
     const fetchMarketplaces = async () => {
       try {
@@ -157,13 +160,11 @@ function ScrapeNew() {
     fetchMarketplaces();
   }, []);
 
-  // ---- Handle marketplace change ----
-  const handleMarketplaceChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
-    const id = e.target.value;
-    setMarketplace(id);
-    const config = marketplaces[id];
+  const handleMarketplaceChange = (value: string) => {
+    setMarketplace(value);
+    const config = marketplaces[value];
     if (config) {
-      if (id === "ALL_EUROPE") {
+      if (value === "ALL_EUROPE") {
         setCurrencyCode("AUTO");
         setCurrencySymbol("AUTO");
       } else {
@@ -173,7 +174,6 @@ function ScrapeNew() {
     }
   };
 
-  // ---- Output name auto-generation and uniqueness ----
   const getUniqueOutputName = (baseName: string): string => {
     if (!baseName) return "";
     let name = baseName.toLowerCase().endsWith(".csv") ? baseName : `${baseName}.csv`;
@@ -332,7 +332,6 @@ function ScrapeNew() {
     await cancelJob();
   };
 
-  // ---- Download handler (fixed to use job UUID with new endpoint) ----
   const handleDownload = async () => {
     if (!job.jobId) {
       toast.error("No job ID available for download");
@@ -340,7 +339,6 @@ function ScrapeNew() {
     }
     try {
       await downloadJobOutput(job.jobId);
-      // Success toast is handled inside downloadJobOutput
     } catch (err) {
       toast.error("Failed to download output file");
       console.error(err);
@@ -349,7 +347,6 @@ function ScrapeNew() {
 
   const threadDots = useMemo(() => [1, 2, 3, 4], []);
 
-  // Determine if Start button should be disabled
   const isStartDisabled = !backendOnline || processing || (quota && quota.remaining <= 0) || (fileInfo && quota && fileInfo.rows > quota.remaining);
 
   const isDone = job.status === "done";
@@ -364,7 +361,6 @@ function ScrapeNew() {
         Drop a CSV of product links, tune the crawl, and let the batches run.
       </p>
 
-      {/* Backend status banner */}
       <div
         className={`mt-4 flex items-center gap-2 rounded-lg border-2 px-4 py-2 text-xs font-semibold transition-colors ${
           backendOnline
@@ -382,7 +378,6 @@ function ScrapeNew() {
           : "Backend offline — start the Python server on port 8000"}
       </div>
 
-      {/* ---- QUOTA DISPLAY ---- */}
       {quota && (
         <div className="mt-4 rounded-lg border-2 bg-muted/20 p-4">
           <div className="flex items-center justify-between">
@@ -431,7 +426,6 @@ function ScrapeNew() {
       )}
 
       <section className="card-hard mt-6 p-5 md:p-7">
-        {/* Dropzone */}
         <div
           onDragOver={(e) => {
             e.preventDefault();
@@ -498,7 +492,6 @@ function ScrapeNew() {
         </div>
         <FieldError msg={errors.file} />
 
-        {/* ---- Result states (done / cancelled) ---- */}
         {showResult && (
           <div className="mt-6 rounded-xl border-2 border-primary/20 bg-primary/5 p-6 space-y-4">
             <div className="flex items-center gap-3">
@@ -516,8 +509,6 @@ function ScrapeNew() {
                 </p>
               </div>
             </div>
-
-            {/* Buttons */}
             <div className="flex flex-wrap gap-3">
               <button
                 onClick={handleDownload}
@@ -534,15 +525,12 @@ function ScrapeNew() {
                 Scrape Another
               </button>
             </div>
-
-            {/* Files page message */}
             <p className="text-sm text-muted-foreground">
               You can access this output file later from the Files page.
             </p>
           </div>
         )}
 
-        {/* ---- Failed state ---- */}
         {isFailed && (
           <div className="mt-6 rounded-xl border-2 border-red-500/20 bg-red-500/5 p-6 space-y-4">
             <div className="flex items-center gap-3">
@@ -564,10 +552,8 @@ function ScrapeNew() {
           </div>
         )}
 
-        {/* ---- Fields (only shown when not in result or failed state) ---- */}
         {!showResult && !isFailed && (
           <div className="mt-6 grid gap-5">
-            {/* Column Name */}
             <Field label="Column Name" hint="Header holding the product URLs" error={errors.column}>
               <input
                 value={column}
@@ -581,33 +567,41 @@ function ScrapeNew() {
               />
             </Field>
 
-            {/* ---- Marketplace and Currency (fixed layout) ---- */}
+            {/* ---- Marketplace and Currency ---- */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
+                <label className="font-display text-sm font-semibold">
                   Amazon Marketplace
                 </label>
-                <select
+                <Select
                   value={marketplace}
-                  onChange={handleMarketplaceChange}
+                  onValueChange={handleMarketplaceChange}
                   disabled={processing || loadingMarketplaces}
-                  className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
                 >
-                  {Object.entries(marketplaces).map(([id, config]) => (
-                    <option key={id} value={id}>
-                      {config.label} ({config.domain})
-                    </option>
-                  ))}
-                </select>
+                  <SelectTrigger className="w-full rounded-lg border-2 border-input bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60">
+                    <SelectValue placeholder="Select marketplace" />
+                  </SelectTrigger>
+                  <SelectContent
+                    side="bottom"
+                    align="start"
+                    className="rounded-lg border-2 border-input bg-popover shadow-lg"
+                  >
+                    {Object.entries(marketplaces).map(([id, config]) => (
+                      <SelectItem key={id} value={id}>
+                        {config.label} ({config.domain})
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
                 <p className="mt-1 text-xs text-muted-foreground">Select the target region</p>
               </div>
 
               <div>
-                <label className="block text-xs font-semibold uppercase tracking-wider mb-1">
+                <label className="font-display text-sm font-semibold">
                   Currency
                 </label>
-                <div className="flex items-center gap-2 rounded-lg border-2 bg-muted/40 px-3 py-2 text-sm font-medium h-[42px]">
-                  <span className="text-lg">{currencySymbol}</span>
+                <div className="flex items-center gap-2 rounded-lg border-2 border-input bg-background px-3 py-2 text-sm font-medium cursor-default opacity-100">
+                  <span>{currencySymbol}</span>
                   <span>{currencyCode}</span>
                   {marketplace === "ALL_EUROPE" && (
                     <span className="ml-auto text-xs text-muted-foreground">
@@ -623,7 +617,6 @@ function ScrapeNew() {
               </div>
             </div>
 
-            {/* Threads */}
             <Field label="Threads" hint="Parallel workers (1–4)" error={errors.threads}>
               <div className="flex items-center gap-3">
                 <input
@@ -652,7 +645,6 @@ function ScrapeNew() {
               </div>
             </Field>
 
-            {/* Batch Gap */}
             <Field label="Batch Gap" hint="Seconds to wait between batches" error={errors.gap}>
               <div className="flex items-center gap-2">
                 <input
@@ -667,7 +659,6 @@ function ScrapeNew() {
               </div>
             </Field>
 
-            {/* First Page Wait */}
             <Field
               label="First Page Wait"
               hint="Minutes (1–5) – optional"
@@ -687,7 +678,6 @@ function ScrapeNew() {
               </div>
             </Field>
 
-            {/* Next Page Wait */}
             <Field
               label="Next Page Wait"
               hint="Seconds (3–60) – optional"
@@ -707,7 +697,6 @@ function ScrapeNew() {
               </div>
             </Field>
 
-            {/* Keywords */}
             <Field
               label="Keywords"
               hint="Comma-separated, max 10 – optional"
@@ -722,7 +711,6 @@ function ScrapeNew() {
               />
             </Field>
 
-            {/* Output File Name */}
             <Field
               label="Output File Name"
               hint="Name of the scraped CSV file"
@@ -758,7 +746,6 @@ function ScrapeNew() {
           </div>
         )}
 
-        {/* Action / progress */}
         <div className="mt-8">
           {job.status === "idle" && (
             <button
@@ -812,8 +799,6 @@ function ScrapeNew() {
     </main>
   );
 }
-
-// ---- Helper components ----
 
 function Field({
   label,
