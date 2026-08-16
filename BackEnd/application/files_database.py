@@ -33,6 +33,8 @@ _CREATE_INDEXES = [
     "CREATE INDEX IF NOT EXISTS idx_files_job_id ON files(job_id);",
     "CREATE INDEX IF NOT EXISTS idx_files_created_at ON files(created_at);",
     "CREATE INDEX IF NOT EXISTS idx_files_deleted_at ON files(deleted_at);",
+    # Partial unique index to enforce uniqueness of filenames among active (non-deleted) files
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_files_active_filename ON files(filename) WHERE deleted_at IS NULL;",
 ]
 
 

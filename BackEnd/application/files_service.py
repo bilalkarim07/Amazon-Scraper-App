@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, List, Dict, Any
@@ -29,28 +30,70 @@ def _row_to_dict(row) -> dict:
     return dict(row) if row else None
 
 
-def generate_unique_filename(base_name: str, job_id: str) -> str:
+def sanitize_filename(base_name: str) -> str:
     """
-    Generate a unique, collision‑safe filename from a user‑provided base.
+    Sanitize and normalize a user-provided output filename.
 
-    The base is sanitised and combined with a timestamp and a short job ID.
-    Example: "my_data.csv" -> "my_data_2acfd374_20260815_210319.csv"
+    The filename remains exactly the user's requested name apart from
+    unsafe characters and the .csv extension.
+
+    Example:
+        "my_data.csv" -> "my_data.csv"
+        "test scraped.csv" -> "test_scraped.csv"
+        "results" -> "results.csv"
     """
-    # Sanitise: keep alphanumerics, underscore, dash, dot; replace others with underscore
-    sanitized = re.sub(r'[^a-zA-Z0-9_.-]', '_', base_name)
+    # Remove any directory/path components.
+    base_name = os.path.basename(base_name.strip())
+
+    # Sanitize: keep alphanumerics, underscore, dash and dot.
+    sanitized = re.sub(r"[^a-zA-Z0-9_.-]", "_", base_name)
+
     if not sanitized:
         sanitized = "output"
 
-    # Ensure .csv extension
-    if not sanitized.lower().endswith('.csv'):
-        sanitized += '.csv'
+    # Ensure .csv extension.
+    if not sanitized.lower().endswith(".csv"):
+        sanitized += ".csv"
 
-    # Split name and extension
+    return sanitized
+
+
+def resolve_unique_filename(base_name: str) -> str:
+    """
+    Return the lowest available filename that does not collide with an active
+    (non‑deleted) file in files.db.
+
+    Examples:
+        existing: output.csv          → returns output.csv
+        existing: output.csv          → returns output_1.csv
+        existing: output.csv, output_1.csv → returns output_2.csv
+        existing: output.csv, output_1.csv, output_3.csv → returns output_2.csv
+    Soft‑deleted files are ignored.
+    """
+    sanitized = sanitize_filename(base_name)
     name, ext = os.path.splitext(sanitized)
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    # Use first 8 chars of job_id for brevity
-    short_job_id = job_id[:8] if len(job_id) >= 8 else job_id
-    return f"{name}_{short_job_id}_{timestamp}{ext}"
+
+    with get_files_connection() as conn:
+        # Query all active filenames that start with the same base name and have the same extension
+        pattern = f"{name}%{ext}"
+        rows = conn.execute(
+            "SELECT filename FROM files WHERE deleted_at IS NULL AND filename LIKE ?",
+            (pattern,)
+        ).fetchall()
+
+    existing = {row["filename"] for row in rows}
+
+    # If the exact name is free, use it
+    if sanitized not in existing:
+        return sanitized
+
+    # Otherwise find the lowest suffix _N
+    suffix = 1
+    while True:
+        candidate = f"{name}_{suffix}{ext}"
+        if candidate not in existing:
+            return candidate
+        suffix += 1
 
 
 def create_file_record(
@@ -83,64 +126,79 @@ def create_file_record(
         logger.error(f"Source file does not exist: {source_path}")
         return None
 
-    # Generate unique filename from the base name (or fallback to source_path.name)
+    # Use base_name if provided, else fallback to source_path.name
     if base_name is None:
         base_name = source_path.name
-    unique_filename = generate_unique_filename(base_name, job_id)
 
-    # Destination path in Files directory
     files_dir = get_files_dir()
-    dest_path = files_dir / unique_filename
-
-    # Ensure Files directory exists
     files_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy the file (not move, to preserve job workspace for debugging)
-    try:
-        shutil.copy2(source_path, dest_path)
-        file_size = dest_path.stat().st_size
-    except Exception as e:
-        logger.error(f"Failed to copy file to Files directory: {e}")
-        return None
+    # Retry loop for concurrent insert conflicts
+    max_retries = 3
+    for attempt in range(max_retries):
+        # Determine the final unique filename
+        unique_filename = resolve_unique_filename(base_name)
+        dest_path = files_dir / unique_filename
 
-    # Store path relative to app data root
-    app_root = get_app_data_root()
-    try:
-        relative_path = str(dest_path.relative_to(app_root))
-    except ValueError:
-        # Fallback: store absolute if path is outside app root
-        relative_path = str(dest_path)
+        # Copy the file (not move, to preserve job workspace for debugging)
+        try:
+            shutil.copy2(source_path, dest_path)
+            file_size = dest_path.stat().st_size
+        except Exception as e:
+            logger.error(f"Failed to copy file to Files directory: {e}")
+            return None
 
-    # Create database record
-    now = _now_iso()
-    with get_files_connection() as conn:
-        cursor = conn.execute(
-            """
-            INSERT INTO files (
-                job_id, filename, path, created_at, updated_at,
-                row_count, status, marketplace, currency_code,
-                source_filename, file_size
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                unique_filename,          # Display name
-                relative_path,            # Physical path
-                now,
-                now,
-                row_count,
-                status,
-                marketplace,
-                currency_code,
-                source_filename,
-                file_size,
-            ),
-        )
-        conn.commit()
-        file_id = cursor.lastrowid
+        # Store path relative to app data root
+        app_root = get_app_data_root()
+        try:
+            relative_path = str(dest_path.relative_to(app_root))
+        except ValueError:
+            relative_path = str(dest_path)
 
-    # Return the created record
-    return get_file(file_id)
+        # Create database record
+        now = _now_iso()
+        try:
+            with get_files_connection() as conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO files (
+                        job_id, filename, path, created_at, updated_at,
+                        row_count, status, marketplace, currency_code,
+                        source_filename, file_size
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id,
+                        unique_filename,          # Display name
+                        relative_path,            # Physical path
+                        now,
+                        now,
+                        row_count,
+                        status,
+                        marketplace,
+                        currency_code,
+                        source_filename,
+                        file_size,
+                    ),
+                )
+                conn.commit()
+                file_id = cursor.lastrowid
+            # Return the created record
+            return get_file(file_id)
+        except sqlite3.IntegrityError as e:
+            # Unique index violation – another job took the same name; retry
+            if attempt == max_retries - 1:
+                logger.error(f"Failed to allocate a unique filename after {max_retries} attempts: {e}")
+                raise RuntimeError(f"Failed to allocate a unique filename after {max_retries} attempts") from e
+            # Remove the copied file (we'll copy again to a new name)
+            if dest_path.exists():
+                try:
+                    dest_path.unlink()
+                except OSError:
+                    pass
+            # Continue to next retry; resolve_unique_filename will be called again
+
+    return None
 
 
 def get_file(file_id: int) -> Optional[Dict[str, Any]]:
@@ -212,31 +270,40 @@ def update_file(file_id: int, **fields) -> Optional[Dict[str, Any]]:
 
     # Validate and sanitize filename if provided
     if "filename" in fields:
-        new_filename = fields["filename"]
-        # Prevent path traversal
-        new_filename = Path(new_filename).name
-        if not new_filename.lower().endswith(".csv"):
-            new_filename += ".csv"
-        fields["filename"] = new_filename
+        new_filename = sanitize_filename(fields["filename"])
 
-        # Also rename the physical file
+        # Check if this new filename is already in use by another active file (excluding self)
         file_record = get_file(file_id)
-        if file_record:
-            old_path = resolve_file_path(file_record)
-            if old_path and old_path.exists():
-                new_path = old_path.parent / new_filename
+        if not file_record:
+            raise ValueError(f"File with id {file_id} not found")
+
+        with get_files_connection() as conn:
+            conflict = conn.execute(
+                "SELECT id FROM files WHERE deleted_at IS NULL AND filename = ? AND id != ?",
+                (new_filename, file_id)
+            ).fetchone()
+            if conflict:
+                raise ValueError(f"Filename '{new_filename}' is already in use by another active file")
+
+        # Rename the physical file
+        old_path = resolve_file_path(file_record)
+        if old_path and old_path.exists():
+            new_path = old_path.parent / new_filename
+            try:
+                old_path.rename(new_path)
+                # Update the path field to reflect the new filename
+                app_root = get_app_data_root()
                 try:
-                    old_path.rename(new_path)
-                    # Update the path field to reflect the new filename
-                    app_root = get_app_data_root()
-                    try:
-                        fields["path"] = str(new_path.relative_to(app_root))
-                    except ValueError:
-                        fields["path"] = str(new_path)
-                except Exception as e:
-                    logger.error(f"Failed to rename physical file: {e}")
-                    # Don't update filename if rename failed
-                    del fields["filename"]
+                    fields["path"] = str(new_path.relative_to(app_root))
+                except ValueError:
+                    fields["path"] = str(new_path)
+            except Exception as e:
+                logger.error(f"Failed to rename physical file: {e}")
+                raise ValueError(f"Could not rename physical file: {e}") from e
+        else:
+            logger.warning(f"Physical file for record {file_id} not found; updating record only")
+
+        fields["filename"] = new_filename
 
     # Update the database
     fields["updated_at"] = _now_iso()

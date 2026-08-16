@@ -11,6 +11,7 @@ from application import scraper_service
 from application import marketplace_config
 from application.models import JobCreateResponse, JobStatusResponse, CancelResponse
 from application.config import DEFAULT_FIRST_PAGE_WAIT, DEFAULT_NEXT_PAGE_WAIT, HEADLESS_MODE
+from application.files_service import sanitize_filename  # <-- Added import
 
 router = APIRouter()
 
@@ -128,11 +129,7 @@ async def create_job(
         quota_service.reserve_quota(0)
 
     # --- Validate / sanitise output filename ---
-    output_filename = output_filename.strip()
-    if not output_filename:
-        output_filename = "output.csv"
-    if not output_filename.lower().endswith(".csv"):
-        output_filename += ".csv"
+    output_filename = sanitize_filename(output_filename)  # <-- Changed to use sanitize_filename
 
     # --- Parse keywords ---
     keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else []
