@@ -56,6 +56,8 @@ const API_BASE =
     ? "http://127.0.0.1:8000"
     : "http://localhost:8000";
 
+// ---- FALLBACK marketplaces (used if backend is not ready) ----
+// "All Europe" has been removed per user request.
 const FALLBACK_MARKETPLACES: Record<string, any> = {
   US: { label: "United States", domain: "amazon.com", currency_code: "USD", currency_symbol: "$" },
   UK: { label: "United Kingdom", domain: "amazon.co.uk", currency_code: "GBP", currency_symbol: "£" },
@@ -79,13 +81,6 @@ const FALLBACK_MARKETPLACES: Record<string, any> = {
   MX: { label: "Mexico", domain: "amazon.com.mx", currency_code: "MXN", currency_symbol: "Mex$" },
   BR: { label: "Brazil", domain: "amazon.com.br", currency_code: "BRL", currency_symbol: "R$" },
   CA: { label: "Canada", domain: "amazon.ca", currency_code: "CAD", currency_symbol: "C$" },
-  ALL_EUROPE: {
-    label: "All Europe",
-    domain: "auto",
-    currency_code: "AUTO",
-    currency_symbol: "AUTO",
-    is_europe_union: true,
-  },
 };
 
 function ScrapeNew() {
@@ -127,12 +122,15 @@ function ScrapeNew() {
     }
   };
 
+  // ---- Fetch marketplace config (with fallback) ----
   useEffect(() => {
     const fetchMarketplaces = async () => {
       try {
         const res = await fetch(`${API_BASE}/api/marketplaces`);
         if (res.ok) {
           const data = await res.json();
+          // Remove ALL_EUROPE if present (user request)
+          delete data.ALL_EUROPE;
           setMarketplaces(data);
           if (data.US) {
             setCurrencyCode(data.US.currency_code);
@@ -160,10 +158,12 @@ function ScrapeNew() {
     fetchMarketplaces();
   }, []);
 
+  // ---- Handle marketplace change (ALL_EUROPE no longer exists, but handler still safe) ----
   const handleMarketplaceChange = (value: string) => {
     setMarketplace(value);
     const config = marketplaces[value];
     if (config) {
+      // "ALL_EUROPE" won't be in marketplaces, but keep fallback
       if (value === "ALL_EUROPE") {
         setCurrencyCode("AUTO");
         setCurrencySymbol("AUTO");
@@ -174,6 +174,7 @@ function ScrapeNew() {
     }
   };
 
+  // ---- Output name auto-generation and uniqueness ----
   const getUniqueOutputName = (baseName: string): string => {
     if (!baseName) return "";
     let name = baseName.toLowerCase().endsWith(".csv") ? baseName : `${baseName}.csv`;
@@ -567,7 +568,7 @@ function ScrapeNew() {
               />
             </Field>
 
-            {/* ---- Marketplace and Currency ---- */}
+            {/* ---- Marketplace and Currency (All Europe removed) ---- */}
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
               <div>
                 <label className="font-display text-sm font-semibold">
@@ -586,11 +587,13 @@ function ScrapeNew() {
                     align="start"
                     className="rounded-lg border-2 border-input bg-popover shadow-lg"
                   >
-                    {Object.entries(marketplaces).map(([id, config]) => (
-                      <SelectItem key={id} value={id}>
-                        {config.label} ({config.domain})
-                      </SelectItem>
-                    ))}
+                    {Object.entries(marketplaces)
+                      .filter(([id]) => id !== "ALL_EUROPE") // 👈 Exclude All Europe
+                      .map(([id, config]) => (
+                        <SelectItem key={id} value={id}>
+                          {config.label} ({config.domain})
+                        </SelectItem>
+                      ))}
                   </SelectContent>
                 </Select>
                 <p className="mt-1 text-xs text-muted-foreground">Select the target region</p>
@@ -603,6 +606,7 @@ function ScrapeNew() {
                 <div className="flex items-center gap-2 rounded-lg border-2 border-input bg-background px-3 py-2 text-sm font-medium cursor-default opacity-100">
                   <span>{currencySymbol}</span>
                   <span>{currencyCode}</span>
+                  {/* "ALL_EUROPE" no longer appears, so the AUTO hint is irrelevant; we keep it for safety */}
                   {marketplace === "ALL_EUROPE" && (
                     <span className="ml-auto text-xs text-muted-foreground">
                       ⓘ Auto-detected

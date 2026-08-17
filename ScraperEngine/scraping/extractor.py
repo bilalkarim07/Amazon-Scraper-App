@@ -83,6 +83,93 @@ def boundary_format(pairs, separator: str = "-" * 40):
     result = "\n".join(out).rstrip(separator).rstrip("\n")
     return result if result else "Not Mentioned"
 
+def extract_top_highlight_div(soup):
+    """
+    Fallback extraction for Amazon's topHighlight container.
+    """
+
+    try:
+        container = soup.find(
+            "div",
+            id="topHighlight"
+        )
+
+        if not container:
+            return "Not Mentioned"
+
+        # -----------------------------------------------------
+        # Most common structure: list items
+        # -----------------------------------------------------
+        bullets = []
+
+        for item in container.find_all("li"):
+            try:
+                value = safe_text(item)
+
+                if (
+                    value != "Not Mentioned"
+                    and value.strip()
+                    and value not in bullets
+                ):
+                    bullets.append(value.strip())
+
+            except Exception as e:
+                logger.debug(
+                    f"topHighlight li parse error: {e}"
+                )
+                continue
+
+        if bullets:
+            return "\n".join(
+                f"• {value}"
+                for value in bullets
+            )
+
+        # -----------------------------------------------------
+        # Secondary structure: spans
+        # -----------------------------------------------------
+        spans = []
+
+        for span in container.find_all("span"):
+            try:
+                value = safe_text(span)
+
+                if (
+                    value != "Not Mentioned"
+                    and value.strip()
+                    and value not in spans
+                ):
+                    spans.append(value.strip())
+
+            except Exception as e:
+                logger.debug(
+                    f"topHighlight span parse error: {e}"
+                )
+                continue
+
+        if spans:
+            return "\n".join(
+                f"• {value}"
+                for value in spans
+            )
+
+        # -----------------------------------------------------
+        # Last resort
+        # -----------------------------------------------------
+        value = safe_text(container)
+
+        return (
+            value
+            if value != "Not Mentioned"
+            else "Not Mentioned"
+        )
+
+    except Exception as e:
+        logger.warning(
+            f"topHighlight fallback failed: {e}"
+        )
+        return "Not Mentioned"
+
 
 # ============================================================================
 # Specialized Extraction Functions
@@ -267,6 +354,183 @@ def scrape_product(driver, url: str, wait: int = 150, cancel_check=None, **kwarg
         logger.error(f"scrape_product failed for {url}: {e}")
         return ProductData.create_fallback(url=url, error=str(e))
 
+def extract_store_fallback(soup):
+    """
+    Fallback Store extraction.
+
+    Order:
+    1. "Visit the..." anchor with a-link-normal class
+    2. Brand label/value
+    3. Not Mentioned
+
+    Returns:
+        tuple: (store_name, store_link)
+    """
+    try:
+        # ---------------------------------------------------------
+        # FALLBACK 1: "Visit the..." anchor
+        # ---------------------------------------------------------
+        anchors = soup.find_all(
+            "a",
+            class_="a-link-normal"
+        )
+
+        for anchor in anchors:
+            try:
+                text = safe_text(anchor)
+
+                if (
+                    text != "Not Mentioned"
+                    and "visit the" in text.lower()
+                ):
+                    href = safe_attr(
+                        anchor,
+                        "href"
+                    )
+
+                    return text, href
+
+            except Exception as e:
+                logger.debug(
+                    f"Store Visit-the anchor parse error: {e}"
+                )
+                continue
+
+        # ---------------------------------------------------------
+        # FALLBACK 2: Brand
+        # ---------------------------------------------------------
+        for tr in soup.find_all("tr"):
+            try:
+                tds = tr.find_all("td")
+
+                if len(tds) >= 2:
+                    label = safe_text(tds[0]).strip()
+                    value = safe_text(tds[1]).strip()
+
+                    if (
+                        label.lower() == "brand"
+                        and value != "Not Mentioned"
+                    ):
+                        return value, "Not Mentioned"
+
+            except Exception as e:
+                logger.debug(
+                    f"Store Brand fallback parse error: {e}"
+                )
+                continue
+
+        # ---------------------------------------------------------
+        # Nothing found
+        # ---------------------------------------------------------
+        return "Not Mentioned", "Not Mentioned"
+
+    except Exception as e:
+        logger.warning(
+            f"Store fallback extraction failed: {e}"
+        )
+
+        return "Not Mentioned", "Not Mentioned"
+
+
+def extract_brand_fallback(soup):
+    """
+    Fallback extraction for Brand.
+
+    Looks for a Brand label in Amazon's product information/detail
+    sections and returns the associated value.
+
+    Returns:
+        str: Brand name or "Not Mentioned"
+    """
+    try:
+        # ---------------------------------------------------------
+        # Strategy 1: productOverview_feature_div
+        # ---------------------------------------------------------
+        overview = soup.find(
+            "div",
+            id="productOverview_feature_div"
+        )
+
+        if overview:
+            for tr in overview.find_all("tr"):
+                try:
+                    tds = tr.find_all("td")
+
+                    if len(tds) >= 2:
+                        label = safe_text(tds[0]).strip()
+                        value = safe_text(tds[1]).strip()
+
+                        if (
+                            label.lower() == "brand"
+                            and value != "Not Mentioned"
+                        ):
+                            return value
+
+                except Exception as e:
+                    logger.debug(
+                        f"Brand overview row parse error: {e}"
+                    )
+                    continue
+
+        # ---------------------------------------------------------
+        # Strategy 2: product details tables
+        # ---------------------------------------------------------
+        for tr in soup.find_all("tr"):
+            try:
+                tds = tr.find_all("td")
+
+                if len(tds) >= 2:
+                    label = safe_text(tds[0]).strip()
+                    value = safe_text(tds[1]).strip()
+
+                    if (
+                        label.lower() == "brand"
+                        and value != "Not Mentioned"
+                    ):
+                        return value
+
+            except Exception as e:
+                logger.debug(
+                    f"Brand table row parse error: {e}"
+                )
+                continue
+
+        # ---------------------------------------------------------
+        # Strategy 3: common Amazon detail elements
+        # ---------------------------------------------------------
+        brand_label = soup.find(
+            string=lambda text: (
+                text
+                and text.strip().lower() == "brand"
+            )
+        )
+
+        if brand_label:
+            try:
+                parent = brand_label.parent
+
+                if parent:
+                    # Look for nearby value
+                    value_element = parent.find_next()
+
+                    if value_element:
+                        value = safe_text(value_element)
+
+                        if value != "Not Mentioned":
+                            return value
+
+            except Exception as e:
+                logger.debug(
+                    f"Brand label fallback parse error: {e}"
+                )
+
+    except Exception as e:
+        logger.warning(
+            f"Brand fallback extraction failed: {e}"
+        )
+
+    return "Not Mentioned"
+
 
 def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_timeout: int = 60) -> ProductData:
     """
@@ -346,12 +610,69 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
     logger.info("[worker] extraction: locating title - DONE")
 
     # --- Store information ---
+    # logger.info("[worker] extraction: locating store - START")
+    # store = soup.find("a", id="bylineInfo")
+    # data['Store Name'] = safe_text(store)
+    # href = safe_attr(store, "href")
+    # data['Store Link'] = href if href != "Not Mentioned" else "Not Mentioned"
+    # logger.info("[worker] extraction: locating store - DONE")
+    
+    # --- Store information ---
     logger.info("[worker] extraction: locating store - START")
-    store = soup.find("a", id="bylineInfo")
-    data['Store Name'] = safe_text(store)
-    href = safe_attr(store, "href")
-    data['Store Link'] = href if href != "Not Mentioned" else "Not Mentioned"
-    logger.info("[worker] extraction: locating store - DONE")
+
+    try:
+        # PRIMARY STRATEGY — preserve existing logic
+        store = soup.find(
+            "a",
+            id="bylineInfo"
+        )
+
+        store_name = safe_text(store)
+        store_link = safe_attr(
+            store,
+            "href"
+        )
+
+        # ---------------------------------------------------------
+        # FALLBACK STRATEGY
+        #
+        # 1. Visit the...
+        # 2. Brand
+        # ---------------------------------------------------------
+        if (
+            store_name == "Not Mentioned"
+            or store_link == "Not Mentioned"
+        ):
+            fallback_name, fallback_link = (
+                extract_store_fallback(soup)
+            )
+
+            if (
+                store_name == "Not Mentioned"
+                and fallback_name != "Not Mentioned"
+            ):
+                store_name = fallback_name
+
+            if (
+                store_link == "Not Mentioned"
+                and fallback_link != "Not Mentioned"
+            ):
+                store_link = fallback_link
+
+        data['Store Name'] = store_name
+        data['Store Link'] = store_link
+
+    except Exception as e:
+        logger.warning(
+            f"[worker] Store extraction failed: {e}"
+        )
+
+        data['Store Name'] = "Not Mentioned"
+        data['Store Link'] = "Not Mentioned"
+
+    logger.info(
+        "[worker] extraction: locating store - DONE"
+    )
 
     # --- Ratings ---
     logger.info("[worker] extraction: locating ratings - START")
@@ -374,68 +695,337 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
     data['Price Box'] = safe_text(price)
     logger.info("[worker] extraction: locating price - DONE")
 
+
     # --- Description ---
     logger.info("[worker] extraction: locating description - START")
-    bullets = soup.find("div", id="feature-bullets")
-    data['Description'] = safe_text(bullets.find("ul")) if bullets else "Not Mentioned"
+
+    try:
+        bullets = soup.find(
+            "div",
+            id="feature-bullets"
+        )
+
+        if bullets:
+            ul = bullets.find("ul")
+
+            if ul:
+                bullet_items = []
+
+                for li in ul.find_all("li"):
+                    try:
+                        value = safe_text(li)
+
+                        if (
+                            value != "Not Mentioned"
+                            and value.strip()
+                        ):
+                            bullet_items.append(
+                                f"• {value.strip()}"
+                            )
+
+                    except Exception as e:
+                        logger.debug(
+                            f"Description bullet parse error: {e}"
+                        )
+                        continue
+
+                data['Description'] = (
+                    "\n".join(bullet_items)
+                    if bullet_items
+                    else safe_text(ul)
+                )
+
+            else:
+                data['Description'] = safe_text(bullets)
+
+        else:
+            data['Description'] = "Not Mentioned"
+
+    except Exception as e:
+        logger.warning(
+            f"[worker] Description extraction failed: {e}"
+        )
+        data['Description'] = "Not Mentioned"
+
     logger.info("[worker] extraction: locating description - DONE")
 
     # --- Top Highlights from poExpander (requires JavaScript click) ---
     logger.info("[worker] extraction: top highlights - START")
+
     item_pairs = []
+    top_highlight_value = "Not Mentioned"
+
     try:
-        # Locate the toggle button with a timeout
-        logger.info("[worker] extraction: looking for poToggleButton - START")
+        # -------------------------------------------------------------
+        # 1. Locate the toggle button
+        # -------------------------------------------------------------
+        logger.info(
+            "[worker] extraction: looking for poToggleButton - START"
+        )
+
         try:
-            toggle_div = driver.find_element(By.ID, "poToggleButton")
-            toggle_anchor = toggle_div.find_element(By.TAG_NAME, "a") if toggle_div else None
+            toggle_div = driver.find_element(
+                By.ID,
+                "poToggleButton"
+            )
+
+            toggle_anchor = (
+                toggle_div.find_element(By.TAG_NAME, "a")
+                if toggle_div
+                else None
+            )
+
         except NoSuchElementException:
             toggle_div = None
             toggle_anchor = None
-        logger.info("[worker] extraction: looking for poToggleButton - DONE")
 
+        logger.info(
+            "[worker] extraction: looking for poToggleButton - DONE"
+        )
+
+        # -------------------------------------------------------------
+        # 2. Click the toggle if available
+        # -------------------------------------------------------------
         if toggle_anchor:
-            logger.info("[worker] extraction: attempting to click toggle - START")
+            logger.info(
+                "[worker] extraction: attempting to click toggle - START"
+            )
+
             try:
                 # Wait for the toggle to be clickable
                 wait_obj = WebDriverWait(driver, 10)
-                clickable_toggle = wait_obj.until(EC.element_to_be_clickable(toggle_anchor))
-                driver.execute_script("arguments[0].click();", clickable_toggle)
-                logger.info("[worker] extraction: toggle clicked successfully")
-                time.sleep(1)  # Brief pause for content to load
-            except TimeoutException:
-                logger.warning("[worker] Toggle click timed out, proceeding without expanding")
-            except Exception as e:
-                logger.warning(f"[worker] Toggle click failed: {e}, proceeding without expanding")
-            logger.info("[worker] extraction: attempting to click toggle - DONE")
 
-        # Now parse the expanded content
-        expander = soup.find("div", id="poExpander")
+                clickable_toggle = wait_obj.until(
+                    EC.element_to_be_clickable(toggle_anchor)
+                )
+
+                driver.execute_script(
+                    "arguments[0].click();",
+                    clickable_toggle
+                )
+
+                logger.info(
+                    "[worker] extraction: toggle clicked successfully"
+                )
+
+                # Brief pause for Amazon's expanded content to load
+                time.sleep(1)
+
+                # -----------------------------------------------------
+                # IMPORTANT:
+                # soup was created before the JavaScript click.
+                # Refresh page source so BeautifulSoup sees the
+                # expanded content.
+                # -----------------------------------------------------
+                try:
+                    source = driver.page_source
+                    soup = BeautifulSoup(
+                        source,
+                        "lxml"
+                    )
+
+                    logger.info(
+                        "[worker] extraction: refreshed page source "
+                        "after top highlights expansion"
+                    )
+
+                except Exception as e:
+                    logger.warning(
+                        "[worker] Failed to refresh soup after "
+                        f"top highlights expansion: {e}"
+                    )
+
+            except TimeoutException:
+                logger.warning(
+                    "[worker] Toggle click timed out, "
+                    "proceeding without expanding"
+                )
+
+            except Exception as e:
+                logger.warning(
+                    "[worker] Toggle click failed: "
+                    f"{e}, proceeding without expanding"
+                )
+
+            logger.info(
+                "[worker] extraction: attempting to click toggle - DONE"
+            )
+
+        # -------------------------------------------------------------
+        # 3. Existing strategy: poExpander
+        # -------------------------------------------------------------
+        expander = soup.find(
+            "div",
+            id="poExpander"
+        )
+
         if expander:
+            logger.info(
+                "[worker] extraction: found poExpander"
+            )
+
             for tr in expander.find_all("tr"):
-                tds = tr.find_all("td")
-                if len(tds) == 2:
-                    item_pairs.append((safe_text(tds[0]), safe_text(tds[1])))
+                try:
+                    tds = tr.find_all("td")
+
+                    if len(tds) == 2:
+                        item_pairs.append(
+                            (
+                                safe_text(tds[0]),
+                                safe_text(tds[1])
+                            )
+                        )
+
+                except Exception as e:
+                    logger.debug(
+                        "[worker] Error processing "
+                        f"poExpander row: {e}"
+                    )
+                    continue
+
         else:
-            # Fallback: look for tr rows with 'po' class
-            rows = soup.find_all("tr", class_=re.compile("a-spacing-small"), role="listitem")
+            # ---------------------------------------------------------
+            # 4. Existing fallback: rows with po/a-spacing-small
+            # ---------------------------------------------------------
+            logger.info(
+                "[worker] extraction: poExpander not found, "
+                "trying po rows fallback"
+            )
+
+            rows = soup.find_all(
+                "tr",
+                class_=re.compile("a-spacing-small"),
+                role="listitem"
+            )
+
             for r in rows:
-                if "po" in r.get("class", []):
-                    spans = r.find_all("span")
-                    if len(spans) >= 2:
-                        item_pairs.append((safe_text(spans[0]), safe_text(spans[1])))
-        # Fallback if still empty
+                try:
+                    if "po" in r.get("class", []):
+                        spans = r.find_all("span")
+
+                        if len(spans) >= 2:
+                            item_pairs.append(
+                                (
+                                    safe_text(spans[0]),
+                                    safe_text(spans[1])
+                                )
+                            )
+
+                except Exception as e:
+                    logger.debug(
+                        "[worker] Error processing po row: "
+                        f"{e}"
+                    )
+                    continue
+
+        # -------------------------------------------------------------
+        # 5. Existing fallback: productOverview_feature_div
+        # -------------------------------------------------------------
         if not item_pairs:
-            overview = soup.find("div", id="productOverview_feature_div")
+            logger.info(
+                "[worker] extraction: no Top Highlights from "
+                "poExpander/po rows, trying productOverview_feature_div"
+            )
+
+            overview = soup.find(
+                "div",
+                id="productOverview_feature_div"
+            )
+
             if overview:
                 for tr in overview.find_all("tr"):
-                    tds = tr.find_all("td")
-                    if len(tds) == 2:
-                        item_pairs.append((safe_text(tds[0]), safe_text(tds[1])))
+                    try:
+                        tds = tr.find_all("td")
+
+                        if len(tds) == 2:
+                            item_pairs.append(
+                                (
+                                    safe_text(tds[0]),
+                                    safe_text(tds[1])
+                                )
+                            )
+
+                    except Exception as e:
+                        logger.debug(
+                            "[worker] Error processing "
+                            f"productOverview row: {e}"
+                        )
+                        continue
+
+        # -------------------------------------------------------------
+        # 6. NEW FINAL FALLBACK: topHighlight
+        # -------------------------------------------------------------
+        if not item_pairs:
+            logger.info(
+                "[worker] extraction: no Top Highlights found "
+                "using existing strategies, trying topHighlight"
+            )
+
+            try:
+                top_highlight_value = extract_top_highlight_div(
+                    soup
+                )
+
+                if top_highlight_value != "Not Mentioned":
+                    logger.info(
+                        "[worker] extraction: Top Highlights found "
+                        "using topHighlight fallback"
+                    )
+                else:
+                    logger.info(
+                        "[worker] extraction: topHighlight "
+                        "did not contain usable data"
+                    )
+
+            except Exception as e:
+                logger.warning(
+                    "[worker] topHighlight fallback failed: "
+                    f"{e}"
+                )
+
+                top_highlight_value = "Not Mentioned"
+
     except Exception as e:
-        logger.warning(f"[worker] Top highlights extraction failed: {e}")
-    data['Top Highlights'] = boundary_format(item_pairs)
-    logger.info("[worker] extraction: top highlights - DONE")
+        logger.warning(
+            "[worker] Top highlights extraction failed: "
+            f"{e}"
+        )
+
+        # Make sure a failure here never breaks the product extraction
+        item_pairs = []
+        top_highlight_value = "Not Mentioned"
+
+
+    # -------------------------------------------------------------
+    # 7. Final Top Highlights value
+    # -------------------------------------------------------------
+    try:
+        if item_pairs:
+            # Existing successful extraction
+            data['Top Highlights'] = boundary_format(
+                item_pairs
+            )
+
+        elif top_highlight_value != "Not Mentioned":
+            # New topHighlight fallback
+            data['Top Highlights'] = top_highlight_value
+
+        else:
+            # Nothing found using any strategy
+            data['Top Highlights'] = "Not Mentioned"
+
+    except Exception as e:
+        logger.warning(
+            "[worker] Failed to format Top Highlights: "
+            f"{e}"
+        )
+
+        data['Top Highlights'] = "Not Mentioned"
+
+
+    logger.info(
+        "[worker] extraction: top highlights - DONE"
+    )
 
     # --- Item Details (using Selenium find_element with timeout) ---
     logger.info("[worker] extraction: item details - START")

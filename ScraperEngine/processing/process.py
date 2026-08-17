@@ -238,6 +238,8 @@ def append_base(content, base_url='https://www.amazon.com/'):
         return 'Not Mentioned'
 
 
+
+
 def _resolve_keyword_column_name(keyword: str, existing_columns) -> str:
     """Pick a safe column name for an extracted keyword."""
     base_name = safe_str(keyword, default="").strip()
@@ -385,11 +387,32 @@ def process_data(
                 continue
     
     # Save processed data
-    print(f"[INFO] Saving processed data to {output_file}")
+    # ---------------------------------------------------------
+    # FINAL OUTPUT TRANSFORMATIONS
+    # ---------------------------------------------------------
+    print("[INFO] Finalizing output dataset...")
+
     try:
-        dataframe.to_csv(output_file, index=False)
+        dataframe = finalize_output_dataframe(dataframe)
     except Exception as e:
-        logger.error(f"Failed to save processed data to {output_file}: {e}")
+        logger.error(
+            f"Final output transformation failed: {e}"
+        )
+
+    # ---------------------------------------------------------
+    # SAVE FINAL DATASET
+    # ---------------------------------------------------------
+    print(f"[INFO] Saving processed data to {output_file}")
+
+    try:
+        dataframe.to_csv(
+            output_file,
+            index=False
+        )
+    except Exception as e:
+        logger.error(
+            f"Failed to save processed data to {output_file}: {e}"
+        )
         raise
     
     t2 = time.time()
@@ -428,3 +451,164 @@ def process_data_with_objects(input_file: str, output_file: str, price_symbol: s
             products.append(ProductData.create_fallback(url=url, error=str(e)))
     
     return products
+
+
+def format_about_this_item(content):
+    """
+    Preserve Amazon's bullet-point structure in the final dataframe.
+    """
+
+    try:
+        if content is None:
+            return 'Not Mentioned'
+
+        text = safe_str(content).strip()
+
+        if not text or text == 'Not Mentioned':
+            return 'Not Mentioned'
+
+        # Already formatted
+        if '• ' in text:
+            lines = []
+
+            for line in text.splitlines():
+                line = line.strip()
+
+                if not line:
+                    continue
+
+                if not line.startswith('•'):
+                    line = f'• {line}'
+
+                lines.append(line)
+
+            return '\n'.join(lines) if lines else 'Not Mentioned'
+
+        # Handle common existing separators
+        parts = re.split(
+            r'\s*(?:\n+|•)\s*',
+            text
+        )
+
+        parts = [
+            part.strip()
+            for part in parts
+            if part.strip()
+        ]
+
+        if not parts:
+            return 'Not Mentioned'
+
+        return '\n'.join(
+            f'• {part}'
+            for part in parts
+        )
+
+    except Exception as e:
+        logger.debug(
+            f"format_about_this_item error: {e}"
+        )
+        return 'Not Mentioned'
+
+def finalize_output_dataframe(dataframe):
+    """
+    Perform final output-only transformations after all extraction
+    and processing logic has completed.
+
+    This function intentionally runs LAST so it does not interfere
+    with existing extraction/processing logic.
+    """
+
+    try:
+        # ---------------------------------------------------------
+        # 1. Remove the original Product Information column
+        # ---------------------------------------------------------
+        #
+        # Best Seller Rank has already been extracted from it by
+        # this point, so it is now safe to remove.
+        #
+        if 'Product Information' in dataframe.columns:
+            try:
+                dataframe = dataframe.drop(
+                    columns=['Product Information']
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not remove Product Information: {e}"
+                )
+
+        # ---------------------------------------------------------
+        # 2. Rename KeyWord -> Product Information
+        # ---------------------------------------------------------
+        if 'KeyWord' in dataframe.columns:
+            try:
+                dataframe = dataframe.rename(
+                    columns={
+                        'KeyWord': 'Product Information'
+                    }
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not rename KeyWord column: {e}"
+                )
+        else:
+            # Keep final schema predictable
+            dataframe['Product Information'] = 'Not Mentioned'
+
+        # ---------------------------------------------------------
+        # 3. Rename Description -> About this item
+        # ---------------------------------------------------------
+        if 'Description' in dataframe.columns:
+            try:
+                dataframe = dataframe.rename(
+                    columns={
+                        'Description': 'About this item'
+                    }
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not rename Description column: {e}"
+                )
+
+        # ---------------------------------------------------------
+        # 4. Remove unwanted columns
+        # ---------------------------------------------------------
+        columns_to_remove = [
+            'Comments',
+            'Availability',
+            'Display Features',
+            'Price Box'
+        ]
+
+        existing_to_remove = [
+            column
+            for column in columns_to_remove
+            if column in dataframe.columns
+        ]
+
+        if existing_to_remove:
+            try:
+                dataframe = dataframe.drop(
+                    columns=existing_to_remove
+                )
+            except Exception as e:
+                logger.warning(
+                    f"Could not remove final columns: {e}"
+                )
+
+        # ---------------------------------------------------------
+        # 5. Format About this item
+        # ---------------------------------------------------------
+        if 'About this item' in dataframe.columns:
+            dataframe['About this item'] = _safe_apply(
+                dataframe['About this item'],
+                format_about_this_item,
+                'About this item'
+            )
+
+    except Exception as e:
+        logger.error(
+            f"Final dataframe transformation failed: {e}"
+        )
+
+    return dataframe
