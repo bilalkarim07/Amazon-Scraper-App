@@ -28,6 +28,7 @@ export type Ctx = {
   refreshFiles: () => Promise<void>;
   refreshQuota: () => Promise<void>;
   resetJob: () => void;
+  updateFileNote: (id: string, note: string) => Promise<void>;
 };
 
 export const ScrapeContext = createContext<Ctx | null>(null);
