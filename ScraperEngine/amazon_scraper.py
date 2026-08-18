@@ -56,7 +56,7 @@ class AmazonScraper:
             'KeyWord'
         ]
 
-        from scraping.extractor import scrape_product
+        from ScraperEngine.scraping.extractor import scrape_product
         self.scrape_function = scrape_product
 
         self._validate_inputs()

@@ -83,93 +83,255 @@ def boundary_format(pairs, separator: str = "-" * 40):
     result = "\n".join(out).rstrip(separator).rstrip("\n")
     return result if result else "Not Mentioned"
 
-def extract_top_highlight_div(soup):
+def extract_top_highlight_container(soup):
     """
-    Fallback extraction for Amazon's topHighlight container.
+    Extract both Top Highlights and About this item from
+    Amazon's #topHighlight container.
+
+    Amazon's structure can contain:
+
+        #topHighlight
+            |
+            +-- .product-facts-detail
+            |       |
+            |       +-- span.a-color-base  -> key
+            |       +-- span.a-color-base  -> value
+            |
+            +-- h3.product-facts-title
+            |       About this item
+            |
+            +-- ul.a-unordered-list
+                    |
+                    +-- li -> About this item bullet
+
+    Returns:
+        tuple:
+            (
+                top_highlights,
+                about_this_item
+            )
     """
 
+    top_highlights = "Not Mentioned"
+    about_this_item = "Not Mentioned"
+
     try:
+
+        # -----------------------------------------------------------
+        # Locate the complete Amazon topHighlight container
+        # -----------------------------------------------------------
         container = soup.find(
             "div",
             id="topHighlight"
         )
 
         if not container:
-            return "Not Mentioned"
-
-        # -----------------------------------------------------
-        # Most common structure: list items
-        # -----------------------------------------------------
-        bullets = []
-
-        for item in container.find_all("li"):
-            try:
-                value = safe_text(item)
-
-                if (
-                    value != "Not Mentioned"
-                    and value.strip()
-                    and value not in bullets
-                ):
-                    bullets.append(value.strip())
-
-            except Exception as e:
-                logger.debug(
-                    f"topHighlight li parse error: {e}"
-                )
-                continue
-
-        if bullets:
-            return "\n".join(
-                f"• {value}"
-                for value in bullets
+            return (
+                top_highlights,
+                about_this_item
             )
 
-        # -----------------------------------------------------
-        # Secondary structure: spans
-        # -----------------------------------------------------
-        spans = []
+        logger.info(
+            "[worker] topHighlight container found; "
+            "extracting Top Highlights + About this item"
+        )
 
-        for span in container.find_all("span"):
-            try:
-                value = safe_text(span)
+        # ===========================================================
+        # PART 1
+        # TOP HIGHLIGHTS
+        #
+        # .product-facts-detail
+        #       ↓
+        # span.a-color-base
+        #       ↓
+        # key + value
+        # ===========================================================
 
-                if (
-                    value != "Not Mentioned"
-                    and value.strip()
-                    and value not in spans
-                ):
-                    spans.append(value.strip())
+        try:
 
-            except Exception as e:
-                logger.debug(
-                    f"topHighlight span parse error: {e}"
-                )
-                continue
+            item_pairs = []
 
-        if spans:
-            return "\n".join(
-                f"• {value}"
-                for value in spans
+            fact_blocks = container.find_all(
+                "div",
+                class_="product-facts-detail"
             )
 
-        # -----------------------------------------------------
-        # Last resort
-        # -----------------------------------------------------
-        value = safe_text(container)
+            for block in fact_blocks:
+
+                try:
+
+                    spans = block.find_all(
+                        "span",
+                        class_="a-color-base"
+                    )
+
+                    if len(spans) < 2:
+                        continue
+
+                    key = safe_text(
+                        spans[0]
+                    )
+
+                    value = safe_text(
+                        spans[1]
+                    )
+
+                    if (
+                        key != "Not Mentioned"
+                        and value != "Not Mentioned"
+                        and key.strip()
+                        and value.strip()
+                    ):
+
+                        item_pairs.append(
+                            (
+                                key.strip(),
+                                value.strip()
+                            )
+                        )
+
+                except Exception as e:
+
+                    logger.debug(
+                        "[worker] topHighlight "
+                        f"fact block parse error: {e}"
+                    )
+
+                    continue
+
+            if item_pairs:
+
+                top_highlights = boundary_format(
+                    item_pairs
+                )
+
+                logger.info(
+                    "[worker] topHighlight: extracted "
+                    f"{len(item_pairs)} fact pair(s)"
+                )
+
+        except Exception as e:
+
+            logger.warning(
+                "[worker] topHighlight facts extraction "
+                f"failed: {e}"
+            )
+
+        # ===========================================================
+        # PART 2
+        # ABOUT THIS ITEM
+        #
+        # Inside the SAME #topHighlight container:
+        #
+        # h3.product-facts-title
+        #       "About this item"
+        #
+        # followed by:
+        #
+        # ul.a-unordered-list
+        #       ↓
+        # li
+        #       ↓
+        # span.a-list-item
+        #
+        # We deliberately scope this search to `container`.
+        # ===========================================================
+
+        try:
+
+            # Find the UL specifically inside topHighlight.
+            about_list = container.find(
+                "ul",
+                class_=re.compile(
+                    r"\ba-unordered-list\b"
+                )
+            )
+
+            if about_list:
+
+                bullets = []
+
+                for li in about_list.find_all(
+                    "li"
+                ):
+
+                    try:
+
+                        # Prefer the actual Amazon list-item span.
+                        span = li.find(
+                            "span",
+                            class_=re.compile(
+                                r"\ba-list-item\b"
+                            )
+                        )
+
+                        if span:
+
+                            bullet = safe_text(
+                                span
+                            )
+
+                        else:
+
+                            bullet = safe_text(
+                                li
+                            )
+
+                        if (
+                            bullet
+                            and bullet != "Not Mentioned"
+                            and bullet not in bullets
+                        ):
+
+                            bullets.append(
+                                bullet
+                            )
+
+                    except Exception as e:
+
+                        logger.debug(
+                            "[worker] topHighlight "
+                            f"About this item li parse error: {e}"
+                        )
+
+                        continue
+
+                if bullets:
+
+                    # Keep the actual bullet representation.
+                    about_this_item = "\n".join(
+                        f"• {bullet}"
+                        for bullet in bullets
+                    )
+
+                    logger.info(
+                        "[worker] topHighlight: extracted "
+                        f"{len(bullets)} About this item bullet(s)"
+                    )
+
+        except Exception as e:
+
+            logger.warning(
+                "[worker] topHighlight About this item "
+                f"extraction failed: {e}"
+            )
 
         return (
-            value
-            if value != "Not Mentioned"
-            else "Not Mentioned"
+            top_highlights,
+            about_this_item
         )
 
     except Exception as e:
-        logger.warning(
-            f"topHighlight fallback failed: {e}"
-        )
-        return "Not Mentioned"
 
+        logger.warning(
+            "[worker] extract_top_highlight_container "
+            f"failed: {e}"
+        )
+
+        return (
+            "Not Mentioned",
+            "Not Mentioned"
+        )
 
 # ============================================================================
 # Specialized Extraction Functions
@@ -696,8 +858,10 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
     logger.info("[worker] extraction: locating price - DONE")
 
 
-    # --- Description ---
-    logger.info("[worker] extraction: locating description - START")
+        # --- Description ---
+    logger.info(
+        "[worker] extraction: locating description - START"
+    )
 
     try:
         bullets = soup.find(
@@ -736,7 +900,9 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
                 )
 
             else:
-                data['Description'] = safe_text(bullets)
+                data['Description'] = safe_text(
+                    bullets
+                )
 
         else:
             data['Description'] = "Not Mentioned"
@@ -745,17 +911,24 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
         logger.warning(
             f"[worker] Description extraction failed: {e}"
         )
+
         data['Description'] = "Not Mentioned"
 
-    logger.info("[worker] extraction: locating description - DONE")
+    logger.info(
+        "[worker] extraction: locating description - DONE"
+    )
+
 
     # --- Top Highlights from poExpander (requires JavaScript click) ---
-    logger.info("[worker] extraction: top highlights - START")
+    logger.info(
+        "[worker] extraction: top highlights - START"
+    )
 
     item_pairs = []
     top_highlight_value = "Not Mentioned"
 
     try:
+
         # -------------------------------------------------------------
         # 1. Locate the toggle button
         # -------------------------------------------------------------
@@ -764,18 +937,33 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
         )
 
         try:
+
             toggle_div = driver.find_element(
                 By.ID,
                 "poToggleButton"
             )
 
             toggle_anchor = (
-                toggle_div.find_element(By.TAG_NAME, "a")
+                toggle_div.find_element(
+                    By.TAG_NAME,
+                    "a"
+                )
                 if toggle_div
                 else None
             )
 
         except NoSuchElementException:
+
+            toggle_div = None
+            toggle_anchor = None
+
+        except Exception as e:
+
+            logger.warning(
+                "[worker] Error locating poToggleButton: "
+                f"{e}"
+            )
+
             toggle_div = None
             toggle_anchor = None
 
@@ -783,20 +971,27 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
             "[worker] extraction: looking for poToggleButton - DONE"
         )
 
+
         # -------------------------------------------------------------
         # 2. Click the toggle if available
         # -------------------------------------------------------------
         if toggle_anchor:
+
             logger.info(
                 "[worker] extraction: attempting to click toggle - START"
             )
 
             try:
-                # Wait for the toggle to be clickable
-                wait_obj = WebDriverWait(driver, 10)
+
+                wait_obj = WebDriverWait(
+                    driver,
+                    10
+                )
 
                 clickable_toggle = wait_obj.until(
-                    EC.element_to_be_clickable(toggle_anchor)
+                    EC.element_to_be_clickable(
+                        toggle_anchor
+                    )
                 )
 
                 driver.execute_script(
@@ -808,17 +1003,21 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
                     "[worker] extraction: toggle clicked successfully"
                 )
 
-                # Brief pause for Amazon's expanded content to load
+                # Give Amazon time to render expanded content.
                 time.sleep(1)
 
                 # -----------------------------------------------------
                 # IMPORTANT:
-                # soup was created before the JavaScript click.
-                # Refresh page source so BeautifulSoup sees the
-                # expanded content.
+                #
+                # soup was created BEFORE the JavaScript click.
+                #
+                # Refresh it so the expanded Amazon HTML becomes
+                # available to BeautifulSoup.
                 # -----------------------------------------------------
                 try:
+
                     source = driver.page_source
+
                     soup = BeautifulSoup(
                         source,
                         "lxml"
@@ -830,18 +1029,21 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
                     )
 
                 except Exception as e:
+
                     logger.warning(
                         "[worker] Failed to refresh soup after "
                         f"top highlights expansion: {e}"
                     )
 
             except TimeoutException:
+
                 logger.warning(
                     "[worker] Toggle click timed out, "
                     "proceeding without expanding"
                 )
 
             except Exception as e:
+
                 logger.warning(
                     "[worker] Toggle click failed: "
                     f"{e}, proceeding without expanding"
@@ -851,176 +1053,454 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
                 "[worker] extraction: attempting to click toggle - DONE"
             )
 
-        # -------------------------------------------------------------
-        # 3. Existing strategy: poExpander
-        # -------------------------------------------------------------
-        expander = soup.find(
-            "div",
-            id="poExpander"
-        )
 
-        if expander:
-            logger.info(
-                "[worker] extraction: found poExpander"
+        # -------------------------------------------------------------
+        # 3. EXISTING STRATEGY:
+        # poExpander
+        # -------------------------------------------------------------
+        try:
+
+            expander = soup.find(
+                "div",
+                id="poExpander"
             )
 
-            for tr in expander.find_all("tr"):
-                try:
-                    tds = tr.find_all("td")
+            if expander:
 
-                    if len(tds) == 2:
-                        item_pairs.append(
-                            (
-                                safe_text(tds[0]),
-                                safe_text(tds[1])
+                logger.info(
+                    "[worker] extraction: found poExpander"
+                )
+
+                for tr in expander.find_all("tr"):
+
+                    try:
+
+                        tds = tr.find_all("td")
+
+                        if len(tds) == 2:
+
+                            key = safe_text(
+                                tds[0]
                             )
+
+                            value = safe_text(
+                                tds[1]
+                            )
+
+                            if (
+                                key != "Not Mentioned"
+                                and value != "Not Mentioned"
+                            ):
+
+                                item_pairs.append(
+                                    (
+                                        key,
+                                        value
+                                    )
+                                )
+
+                    except Exception as e:
+
+                        logger.debug(
+                            "[worker] Error processing "
+                            f"poExpander row: {e}"
                         )
 
-                except Exception as e:
-                    logger.debug(
-                        "[worker] Error processing "
-                        f"poExpander row: {e}"
-                    )
-                    continue
+                        continue
 
-        else:
-            # ---------------------------------------------------------
-            # 4. Existing fallback: rows with po/a-spacing-small
-            # ---------------------------------------------------------
-            logger.info(
-                "[worker] extraction: poExpander not found, "
-                "trying po rows fallback"
-            )
+            else:
 
-            rows = soup.find_all(
-                "tr",
-                class_=re.compile("a-spacing-small"),
-                role="listitem"
-            )
+                # -----------------------------------------------------
+                # 4. EXISTING FALLBACK:
+                # po rows / a-spacing-small
+                # -----------------------------------------------------
+                logger.info(
+                    "[worker] extraction: poExpander not found, "
+                    "trying po rows fallback"
+                )
 
-            for r in rows:
                 try:
-                    if "po" in r.get("class", []):
-                        spans = r.find_all("span")
 
-                        if len(spans) >= 2:
-                            item_pairs.append(
-                                (
-                                    safe_text(spans[0]),
-                                    safe_text(spans[1])
-                                )
+                    rows = soup.find_all(
+                        "tr",
+                        class_=re.compile(
+                            "a-spacing-small"
+                        ),
+                        role="listitem"
+                    )
+
+                    for r in rows:
+
+                        try:
+
+                            if "po" not in r.get(
+                                "class",
+                                []
+                            ):
+                                continue
+
+                            spans = r.find_all(
+                                "span"
                             )
 
+                            if len(spans) >= 2:
+
+                                key = safe_text(
+                                    spans[0]
+                                )
+
+                                value = safe_text(
+                                    spans[1]
+                                )
+
+                                if (
+                                    key != "Not Mentioned"
+                                    and value != "Not Mentioned"
+                                ):
+
+                                    item_pairs.append(
+                                        (
+                                            key,
+                                            value
+                                        )
+                                    )
+
+                        except Exception as e:
+
+                            logger.debug(
+                                "[worker] Error processing po row: "
+                                f"{e}"
+                            )
+
+                            continue
+
                 except Exception as e:
-                    logger.debug(
-                        "[worker] Error processing po row: "
+
+                    logger.warning(
+                        "[worker] po rows fallback failed: "
                         f"{e}"
                     )
-                    continue
+
+        except Exception as e:
+
+            logger.warning(
+                "[worker] poExpander extraction failed: "
+                f"{e}"
+            )
+
 
         # -------------------------------------------------------------
-        # 5. Existing fallback: productOverview_feature_div
+        # 5. EXISTING FALLBACK:
+        # productOverview_feature_div
         # -------------------------------------------------------------
         if not item_pairs:
+
             logger.info(
                 "[worker] extraction: no Top Highlights from "
                 "poExpander/po rows, trying productOverview_feature_div"
             )
 
-            overview = soup.find(
-                "div",
-                id="productOverview_feature_div"
-            )
+            try:
 
-            if overview:
-                for tr in overview.find_all("tr"):
-                    try:
-                        tds = tr.find_all("td")
+                overview = soup.find(
+                    "div",
+                    id="productOverview_feature_div"
+                )
 
-                        if len(tds) == 2:
-                            item_pairs.append(
-                                (
-                                    safe_text(tds[0]),
-                                    safe_text(tds[1])
+                if overview:
+
+                    for tr in overview.find_all("tr"):
+
+                        try:
+
+                            tds = tr.find_all("td")
+
+                            if len(tds) == 2:
+
+                                key = safe_text(
+                                    tds[0]
                                 )
+
+                                value = safe_text(
+                                    tds[1]
+                                )
+
+                                if (
+                                    key != "Not Mentioned"
+                                    and value != "Not Mentioned"
+                                ):
+
+                                    item_pairs.append(
+                                        (
+                                            key,
+                                            value
+                                        )
+                                    )
+
+                        except Exception as e:
+
+                            logger.debug(
+                                "[worker] Error processing "
+                                f"productOverview row: {e}"
                             )
 
-                    except Exception as e:
-                        logger.debug(
-                            "[worker] Error processing "
-                            f"productOverview row: {e}"
-                        )
-                        continue
+                            continue
+
+            except Exception as e:
+
+                logger.warning(
+                    "[worker] productOverview_feature_div "
+                    f"fallback failed: {e}"
+                )
+
 
         # -------------------------------------------------------------
-        # 6. NEW FINAL FALLBACK: topHighlight
+        # 6. NEW STRATEGY:
+        #
+        # #topHighlight contains BOTH:
+        #
+        #   A. Top Highlights
+        #      product-facts-detail
+        #
+        #   B. About this item
+        #      ul -> li -> span.a-list-item
+        #
+        # IMPORTANT:
+        #
+        # This does NOT replace any existing strategy.
+        #
+        # It only runs when the existing Top Highlights strategies
+        # did not produce item_pairs.
         # -------------------------------------------------------------
         if not item_pairs:
+
             logger.info(
                 "[worker] extraction: no Top Highlights found "
-                "using existing strategies, trying topHighlight"
+                "using existing strategies, trying combined "
+                "#topHighlight strategy"
             )
 
             try:
-                top_highlight_value = extract_top_highlight_div(
+
+                (
+                    combined_top_highlight,
+                    combined_about_this_item
+                ) = extract_top_highlight_container(
                     soup
                 )
 
-                if top_highlight_value != "Not Mentioned":
-                    logger.info(
-                        "[worker] extraction: Top Highlights found "
-                        "using topHighlight fallback"
+                # -----------------------------------------------------
+                # 6A. Top Highlights from #topHighlight
+                # -----------------------------------------------------
+                if (
+                    combined_top_highlight
+                    and combined_top_highlight
+                    != "Not Mentioned"
+                ):
+
+                    top_highlight_value = (
+                        combined_top_highlight
                     )
-                else:
+
                     logger.info(
-                        "[worker] extraction: topHighlight "
-                        "did not contain usable data"
+                        "[worker] extraction: Top Highlights "
+                        "found using #topHighlight strategy"
+                    )
+
+                # -----------------------------------------------------
+                # 6B. About this item from #topHighlight
+                #
+                # Only use it if the existing Description extraction
+                # did NOT already find usable data.
+                # -----------------------------------------------------
+                if (
+                    combined_about_this_item
+                    and combined_about_this_item
+                    != "Not Mentioned"
+                ):
+
+                    existing_description = data.get(
+                        "Description",
+                        "Not Mentioned"
+                    )
+
+                    # Treat all of these as missing:
+                    #
+                    # None
+                    # null
+                    # NaN
+                    # ""
+                    # whitespace
+                    # Not Mentioned
+                    #
+                    description_missing = (
+                        existing_description is None
+                        or str(
+                            existing_description
+                        ).strip() == ""
+                        or str(
+                            existing_description
+                        ).strip().lower()
+                        in {
+                            "none",
+                            "null",
+                            "nan",
+                            "not mentioned",
+                        }
+                    )
+
+                    if description_missing:
+
+                        data["Description"] = (
+                            combined_about_this_item
+                        )
+
+                        logger.info(
+                            "[worker] extraction: About this item "
+                            "found using #topHighlight strategy"
+                        )
+
+                    else:
+
+                        logger.debug(
+                            "[worker] extraction: existing Description "
+                            "already contains data; preserving it"
+                        )
+
+            except Exception as e:
+
+                logger.warning(
+                    "[worker] #topHighlight combined strategy failed: "
+                    f"{e}"
+                )
+
+
+        # -------------------------------------------------------------
+        # 7. EXISTING topHighlight FALLBACK
+        #
+        # IMPORTANT:
+        #
+        # We KEEP your original extract_top_highlight_div()
+        # strategy.
+        #
+        # It only runs if the new combined strategy did not find
+        # Top Highlights.
+        # -------------------------------------------------------------
+        if (
+            not item_pairs
+            and top_highlight_value == "Not Mentioned"
+        ):
+
+            logger.info(
+                "[worker] extraction: trying existing "
+                "extract_top_highlight_div fallback"
+            )
+
+            try:
+
+                fallback_top_highlight = (
+                    extract_top_highlight_div(
+                        soup
+                    )
+                )
+
+                if (
+                    fallback_top_highlight
+                    and fallback_top_highlight
+                    != "Not Mentioned"
+                ):
+
+                    top_highlight_value = (
+                        fallback_top_highlight
+                    )
+
+                    logger.info(
+                        "[worker] extraction: Top Highlights "
+                        "found using existing topHighlight fallback"
+                    )
+
+                else:
+
+                    logger.info(
+                        "[worker] extraction: existing "
+                        "topHighlight fallback did not "
+                        "contain usable data"
                     )
 
             except Exception as e:
+
                 logger.warning(
-                    "[worker] topHighlight fallback failed: "
+                    "[worker] existing topHighlight fallback failed: "
                     f"{e}"
                 )
 
                 top_highlight_value = "Not Mentioned"
 
+
     except Exception as e:
+
         logger.warning(
             "[worker] Top highlights extraction failed: "
             f"{e}"
         )
 
-        # Make sure a failure here never breaks the product extraction
+        # -------------------------------------------------------------
+        # SAFETY:
+        #
+        # A failure in Top Highlights extraction must NEVER break
+        # extraction of the rest of the product.
+        # -------------------------------------------------------------
         item_pairs = []
-        top_highlight_value = "Not Mentioned"
+
+        if not top_highlight_value:
+            top_highlight_value = "Not Mentioned"
 
 
     # -------------------------------------------------------------
-    # 7. Final Top Highlights value
+    # 8. FINAL TOP HIGHLIGHTS VALUE
     # -------------------------------------------------------------
     try:
+
         if item_pairs:
-            # Existing successful extraction
-            data['Top Highlights'] = boundary_format(
-                item_pairs
+
+            # ---------------------------------------------------------
+            # Existing successful strategies won.
+            # ---------------------------------------------------------
+            data['Top Highlights'] = (
+                boundary_format(
+                    item_pairs
+                )
             )
 
-        elif top_highlight_value != "Not Mentioned":
-            # New topHighlight fallback
-            data['Top Highlights'] = top_highlight_value
+        elif (
+            top_highlight_value
+            and top_highlight_value
+            != "Not Mentioned"
+        ):
+
+            # ---------------------------------------------------------
+            # #topHighlight or existing helper fallback.
+            # ---------------------------------------------------------
+            data['Top Highlights'] = (
+                top_highlight_value
+            )
 
         else:
-            # Nothing found using any strategy
-            data['Top Highlights'] = "Not Mentioned"
+
+            data['Top Highlights'] = (
+                "Not Mentioned"
+            )
 
     except Exception as e:
+
         logger.warning(
             "[worker] Failed to format Top Highlights: "
             f"{e}"
         )
 
-        data['Top Highlights'] = "Not Mentioned"
+        data['Top Highlights'] = (
+            "Not Mentioned"
+        )
 
 
     logger.info(

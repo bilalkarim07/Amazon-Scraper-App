@@ -14,11 +14,6 @@ class ProgressReporter:
         self._processed = 0
         self._lock = threading.RLock()
         self._cancelled = False
-        # NEW: track timeout count separately
-        self.timeout_count = 0
-        # Also track success and failure counts for internal consistency
-        self.success_count = 0
-        self.failure_count = 0
 
     def set_total(self, total: int) -> None:
         with self._lock:
@@ -91,40 +86,15 @@ class ProgressReporter:
             }
         self._emit(data)
 
-    def emit_completed(self, total: int, success: int, timeout: int, failure: int) -> None:
-        """
-        Emit a completed event with full statistics.
-        
-        Args:
-            total: Total URLs processed.
-            success: Number of successfully scraped URLs.
-            timeout: Number of URLs that timed out.
-            failure: Number of URLs that failed (excluding timeouts).
-        """
+    def emit_completed(self) -> None:
+        """Emit a completed event."""
         with self._lock:
-            self._total = total
-            self.success_count = success
-            self.timeout_count = timeout
-            self.failure_count = failure
             data = {
                 "event": "completed",
-                "total": total,
-                "successful": success,
-                "timeout": timeout,
-                "failure": failure,
-                "processed": success + timeout + failure,
+                "processed": self._processed,
+                "total": self._total,
             }
         self._emit(data)
-
-    def emit_completed_with_counts(self, success: int, failed: int, total: int) -> None:
-        """
-        Legacy method for backward compatibility.
-        Treats timeouts as part of failures if only two counts are provided.
-        This can be used by older code that does not yet distinguish timeouts.
-        """
-        # We assume the difference between total and (success+failure) are timeouts
-        timeout = total - success - failed
-        self.emit_completed(total, success, timeout, failed)
 
     def emit_failed(self, error: str) -> None:
         """Emit a failed event."""
@@ -143,3 +113,25 @@ class ProgressReporter:
     @property
     def is_cancelled(self) -> bool:
         return self._cancelled
+
+    def emit_completed_with_counts(self, success: int, failed: int, total: int):
+        """Emit a completed event with detailed success/failure counts."""
+        with self._lock:
+            data = {
+                "event": "completed",
+                "total": total,
+                "successful": success,
+                "failed": failed,
+                "processed": success + failed,
+            }
+        self._emit(data)
+    
+    def emit_final_completed(self, total: int, successful: int, failed: int):
+        data = {
+            "event": "completed",
+            "total": total,
+            "successful": successful,
+            "failed": failed,
+            "processed": successful + failed,
+        }
+        self._emit(data)

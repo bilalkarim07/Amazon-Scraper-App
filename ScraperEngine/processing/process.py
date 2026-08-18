@@ -387,38 +387,102 @@ def process_data(
                 continue
     
     # Save processed data
-    # ---------------------------------------------------------
-    # FINAL OUTPUT TRANSFORMATIONS
-    # ---------------------------------------------------------
-    print("[INFO] Finalizing output dataset...")
+        # ---------------------------------------------------------------
+    # FINAL DATASET CLEANUP
+    # ---------------------------------------------------------------
+    print("[INFO] Preparing final dataset...")
 
     try:
-        dataframe = finalize_output_dataframe(dataframe)
-    except Exception as e:
-        logger.error(
-            f"Final output transformation failed: {e}"
+        # -----------------------------------------------------------
+        # Remove columns that should not appear in the final
+        # client-facing dataset.
+        # -----------------------------------------------------------
+        columns_to_remove = [
+            'Comments',
+            'Availability',
+            'Display Features',
+            'Price Box',
+            'Product Information',
+        ]
+
+        dataframe.drop(
+            columns=[
+                column
+                for column in columns_to_remove
+                if column in dataframe.columns
+            ],
+            inplace=True,
+            errors='ignore'
         )
 
-    # ---------------------------------------------------------
-    # SAVE FINAL DATASET
-    # ---------------------------------------------------------
-    print(f"[INFO] Saving processed data to {output_file}")
+        # -----------------------------------------------------------
+        # Rename final columns.
+        #
+        # KeyWord -> Product Information
+        # Description -> About this item
+        # -----------------------------------------------------------
+        rename_map = {}
+
+        if 'KeyWord' in dataframe.columns:
+            rename_map['KeyWord'] = 'Product Information'
+
+        if 'Description' in dataframe.columns:
+            rename_map['Description'] = 'About this item'
+
+        if rename_map:
+            dataframe.rename(
+                columns=rename_map,
+                inplace=True
+            )
+
+        # -----------------------------------------------------------
+        # FINAL ABOUT THIS ITEM REPAIR
+        #
+        # This runs AFTER:
+        #   - extraction
+        #   - processing
+        #   - column removal
+        #   - column renaming
+        #
+        # Therefore repair_about_this_item() works directly with
+        # the final column names.
+        # -----------------------------------------------------------
+        try:
+            dataframe = repair_about_this_item(
+                dataframe
+            )
+
+        except Exception as e:
+            logger.warning(
+                "[processor] Final About this item repair "
+                f"failed: {e}"
+            )
+
+    except Exception as e:
+        logger.warning(
+            "[processor] Final dataset cleanup failed: "
+            f"{e}"
+        )
+
+    # ---------------------------------------------------------------
+    # SAVE FINAL PROCESSED DATA
+    # ---------------------------------------------------------------
+    print(
+        f"[INFO] Saving processed data to {output_file}"
+    )
 
     try:
         dataframe.to_csv(
             output_file,
             index=False
         )
+
     except Exception as e:
         logger.error(
-            f"Failed to save processed data to {output_file}: {e}"
+            f"Failed to save processed data to "
+            f"{output_file}: {e}"
         )
         raise
-    
-    t2 = time.time()
-    print(f"[INFO] Processing completed in {t2 - t1:.2f} seconds")
-    
-    return dataframe
 
 
 def process_data_with_objects(input_file: str, output_file: str, price_symbol: str = '$',
@@ -612,3 +676,440 @@ def finalize_output_dataframe(dataframe):
         )
 
     return dataframe
+
+
+
+def repair_about_this_item(df):
+    """
+    Final-stage repair for 'About this item'.
+
+    This runs AFTER:
+        1. Extraction
+        2. Processing
+        3. Column removal
+        4. Column renaming
+
+    Rules:
+        - Never overwrite an existing About this item value.
+        - Only repair rows where About this item is missing.
+        - Top Highlights must contain a usable value.
+        - Product Information-style key/value data is NOT treated
+          as About this item.
+        - Valid bullet-style Top Highlights can be transferred
+          into About this item.
+        - After successful transfer, Top Highlights is changed
+          to 'Not Mentioned'.
+        - Every operation is protected by exception handling.
+    """
+
+    try:
+
+        # -----------------------------------------------------------
+        # Validate required columns
+        # -----------------------------------------------------------
+        if "About this item" not in df.columns:
+
+            logger.warning(
+                "[processor] 'About this item' column "
+                "not found; skipping repair"
+            )
+
+            return df
+
+        if "Top Highlights" not in df.columns:
+
+            logger.warning(
+                "[processor] 'Top Highlights' column "
+                "not found; skipping repair"
+            )
+
+            return df
+
+        # -----------------------------------------------------------
+        # Helper: determine whether a value is missing
+        # -----------------------------------------------------------
+        def is_missing(value):
+
+            try:
+
+                if value is None:
+                    return True
+
+                if pd.isna(value):
+                    return True
+
+                value = str(value).strip()
+
+                return (
+                    value == ""
+                    or value.lower() in {
+                        "none",
+                        "null",
+                        "nan",
+                        "not mentioned",
+                    }
+                )
+
+            except Exception as e:
+
+                logger.debug(
+                    "[processor] is_missing() failed: "
+                    f"{e}"
+                )
+
+                return True
+
+        # -----------------------------------------------------------
+        # Helper: split Product Information into sections
+        #
+        # Example:
+        #
+        # Brand | Apple
+        # ----------------------------------------
+        # Operating System | iOS 16
+        # ----------------------------------------
+        # RAM | 8 GB
+        # -----------------------------------------------------------
+        def split_product_information(value):
+
+            try:
+
+                text = str(value).strip()
+
+                if not text:
+                    return []
+
+                sections = [
+                    section.strip()
+                    for section in re.split(
+                        r"-{5,}",
+                        text
+                    )
+                    if section.strip()
+                ]
+
+                return sections
+
+            except Exception as e:
+
+                logger.debug(
+                    "[processor] split_product_information() "
+                    f"failed: {e}"
+                )
+
+                return []
+
+        # -----------------------------------------------------------
+        # Helper: detect Product Information
+        #
+        # We are specifically looking for multiple:
+        #
+        # Key | Value
+        #
+        # pairs separated by horizontal boundaries.
+        # -----------------------------------------------------------
+        def looks_like_product_information(value):
+
+            try:
+
+                sections = split_product_information(
+                    value
+                )
+
+                # Product Information should contain multiple
+                # sections.
+                if len(sections) < 2:
+                    return False
+
+                key_value_count = 0
+
+                for section in sections:
+
+                    try:
+
+                        if "|" not in section:
+                            continue
+
+                        left, right = section.split(
+                            "|",
+                            1
+                        )
+
+                        if (
+                            left.strip()
+                            and right.strip()
+                        ):
+                            key_value_count += 1
+
+                    except Exception as e:
+
+                        logger.debug(
+                            "[processor] Product Information "
+                            f"section parse failed: {e}"
+                        )
+
+                        continue
+
+                return key_value_count >= 2
+
+            except Exception as e:
+
+                logger.debug(
+                    "[processor] "
+                    "looks_like_product_information() failed: "
+                    f"{e}"
+                )
+
+                return False
+
+        # -----------------------------------------------------------
+        # Helper: detect bullet-style About this item
+        #
+        # Examples:
+        #
+        # • Fully unlocked...
+        # • Inspected and guaranteed...
+        # • Successfully passed...
+        # -----------------------------------------------------------
+        def looks_like_about_this_item(value):
+
+            try:
+
+                text = str(value).strip()
+
+                if not text:
+                    return False
+
+                # Never classify Product Information as
+                # About this item.
+                if looks_like_product_information(
+                    text
+                ):
+                    return False
+
+                lines = [
+                    line.strip()
+                    for line in text.splitlines()
+                    if line.strip()
+                ]
+
+                if not lines:
+                    return False
+
+                bullet_prefixes = (
+                    "•",
+                    "▪",
+                    "●",
+                    "○",
+                    "◦",
+                    "- ",
+                    "* ",
+                )
+
+                bullet_lines = [
+                    line
+                    for line in lines
+                    if line.startswith(
+                        bullet_prefixes
+                    )
+                ]
+
+                return len(bullet_lines) >= 1
+
+            except Exception as e:
+
+                logger.debug(
+                    "[processor] "
+                    "looks_like_about_this_item() failed: "
+                    f"{e}"
+                )
+
+                return False
+
+        # -----------------------------------------------------------
+        # Counters for diagnostics
+        # -----------------------------------------------------------
+        repaired_count = 0
+        product_information_count = 0
+        invalid_top_highlight_count = 0
+
+        logger.info(
+            "[processor] Starting final "
+            "About this item validation"
+        )
+
+        # -----------------------------------------------------------
+        # Process every row independently
+        # -----------------------------------------------------------
+        for index in df.index:
+
+            try:
+
+                about_value = df.at[
+                    index,
+                    "About this item"
+                ]
+
+                top_highlight_value = df.at[
+                    index,
+                    "Top Highlights"
+                ]
+
+                # -------------------------------------------------
+                # CASE 1:
+                # About this item already has a value.
+                #
+                # DO NOTHING.
+                # -------------------------------------------------
+                if not is_missing(
+                    about_value
+                ):
+                    continue
+
+                # -------------------------------------------------
+                # CASE 2:
+                # About this item is missing and Top Highlights
+                # is also missing.
+                #
+                # Nothing can be repaired.
+                # -------------------------------------------------
+                if is_missing(
+                    top_highlight_value
+                ):
+                    continue
+
+                # -------------------------------------------------
+                # CASE 3:
+                # Top Highlights contains Product Information.
+                #
+                # Example:
+                #
+                # Brand | Apple
+                # ----------------------------------------
+                # Operating System | iOS 16
+                # ----------------------------------------
+                # RAM | 8 GB
+                #
+                # DO NOT copy this into About this item.
+                # -------------------------------------------------
+                if looks_like_product_information(
+                    top_highlight_value
+                ):
+
+                    product_information_count += 1
+
+                    logger.warning(
+                        "[processor] About this item missing "
+                        "but Top Highlights contains "
+                        "Product Information. "
+                        f"Row index={index}"
+                    )
+
+                    logger.warning(
+                        "[processor] Product Information "
+                        f"candidate at row {index}: "
+                        f"{str(top_highlight_value)[:500]}"
+                    )
+
+                    continue
+
+                # -------------------------------------------------
+                # CASE 4:
+                # Top Highlights contains valid bullet-style
+                # About this item content.
+                #
+                # Transfer:
+                #
+                # Top Highlights
+                #       ↓
+                # About this item
+                #
+                # Then clear Top Highlights.
+                # -------------------------------------------------
+                if looks_like_about_this_item(
+                    top_highlight_value
+                ):
+
+                    # Copy Top Highlights into About this item.
+                    df.at[
+                        index,
+                        "About this item"
+                    ] = top_highlight_value
+
+                    # We successfully used Top Highlights to
+                    # repair About this item.
+                    #
+                    # Therefore remove the duplicate value from
+                    # Top Highlights.
+                    df.at[
+                        index,
+                        "Top Highlights"
+                    ] = "Not Mentioned"
+
+                    repaired_count += 1
+
+                    logger.info(
+                        "[processor] Repaired About this item "
+                        f"from Top Highlights at row {index}; "
+                        "Top Highlights reset to Not Mentioned"
+                    )
+
+                    continue
+
+                # -------------------------------------------------
+                # CASE 5:
+                # Top Highlights exists but does not match a
+                # recognized About this item format.
+                #
+                # Don't guess.
+                # -------------------------------------------------
+                invalid_top_highlight_count += 1
+
+                logger.warning(
+                    "[processor] About this item missing "
+                    "but Top Highlights did not match "
+                    "a recognized About this item format. "
+                    f"Row index={index}"
+                )
+
+            except Exception as e:
+
+                # -------------------------------------------------
+                # IMPORTANT:
+                # One bad row must NEVER stop processing.
+                # -------------------------------------------------
+                logger.warning(
+                    "[processor] Failed to process "
+                    f"About this item row {index}: {e}"
+                )
+
+                continue
+
+        # -----------------------------------------------------------
+        # Final diagnostics
+        # -----------------------------------------------------------
+        logger.info(
+            "[processor] Final About this item validation "
+            "completed | "
+            f"repaired={repaired_count} | "
+            f"product_information={product_information_count} | "
+            f"unrecognized={invalid_top_highlight_count}"
+        )
+
+        return df
+
+    except Exception as e:
+
+        # -----------------------------------------------------------
+        # Global safety net.
+        #
+        # Even if something unexpected happens inside the repair
+        # function, return the original dataframe rather than
+        # breaking the scraper/process pipeline.
+        # -----------------------------------------------------------
+        logger.warning(
+            "[processor] Final About this item validation "
+            f"failed: {e}"
+        )
+
+        return df
