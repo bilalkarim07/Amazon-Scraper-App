@@ -81,6 +81,21 @@ function buildFormData(opts: {
   return fd;
 }
 
+function validateRenameFilename(filename: string): string {
+  const trimmed = filename.trim();
+
+  if (!trimmed) throw new Error("File name cannot be empty.");
+  if (trimmed.length > 180) throw new Error("File name is too long.");
+  if (trimmed.includes("/") || trimmed.includes("\\")) {
+    throw new Error("File name cannot contain path separators.");
+  }
+  if (!/^[a-zA-Z0-9._ -]+$/.test(trimmed)) {
+    throw new Error("Use only letters, numbers, spaces, dots, hyphens, and underscores.");
+  }
+
+  return trimmed.toLowerCase().endsWith(".csv") ? trimmed : `${trimmed}.csv`;
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
@@ -180,6 +195,56 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       throw err;
     }
   }, [refreshFiles]);
+
+  // ---- RENAME FILE ----
+  const renameFile = useCallback(async (id: string, filename: string) => {
+    const normalizedName = validateRenameFilename(filename);
+    const current = files.find((file) => file.id === id);
+
+    if (!current) {
+      throw new Error("File no longer exists. Refresh the Files page and try again.");
+    }
+
+    const conflict = files.some(
+      (file) =>
+        file.id !== id &&
+        file.name.trim().toLocaleLowerCase() === normalizedName.toLocaleLowerCase(),
+    );
+
+    if (conflict) {
+      throw new Error(`A file named "${normalizedName}" already exists.`);
+    }
+
+    if (current.name.toLocaleLowerCase() === normalizedName.toLocaleLowerCase()) {
+      return;
+    }
+
+    try {
+      const res = await fetch(`${API_BASE}/api/files/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: normalizedName }),
+      });
+
+      if (!res.ok) {
+        let message = `Rename failed: ${res.status}`;
+        try {
+          const data = await res.json();
+          if (typeof data?.detail === "string") message = data.detail;
+        } catch {
+          // Keep the fallback message when the backend response is not JSON.
+        }
+        throw new Error(message);
+      }
+
+      await refreshFiles();
+      toast.success(`Renamed to ${normalizedName}`);
+    } catch (err: any) {
+      console.error("Rename error:", err);
+      toast.error(err?.message || "Failed to rename file");
+      throw err;
+    }
+  }, [files, refreshFiles]);
 
   // ---- UPDATE FILE NOTE ----
   const updateFileNote = useCallback(async (id: string, note: string) => {
@@ -427,6 +492,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       startJob,
       cancelJob,
       deleteFile,
+      renameFile,
       downloadFile,
       refreshFiles,
       refreshQuota,
@@ -441,7 +507,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       startJob,
       cancelJob,
       deleteFile,
-      downloadFile,
+      renameFile,
       refreshFiles,
       refreshQuota,
       resetJob,
