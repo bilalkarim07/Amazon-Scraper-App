@@ -23,6 +23,7 @@ export type Ctx = {
   }) => Promise<void>;
   cancelJob: () => Promise<void>;
   deleteFile: (id: string) => Promise<void>;
+  renameFile: (id: string, filename: string) => Promise<void>;
   downloadFile: (file: ScrapedFile) => Promise<void>;
   refreshFiles: () => Promise<void>;
   refreshQuota: () => Promise<void>;
