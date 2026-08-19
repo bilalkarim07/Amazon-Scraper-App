@@ -1,8 +1,8 @@
 // FrontEnd/src/routes/files.tsx
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
-import { Download, Trash2, Inbox, Loader2, Plus, Pencil } from "lucide-react";
+import { Download, Trash2, Inbox, Loader2, Plus, Pencil, ChevronLeft, ChevronRight } from "lucide-react";
 import { toast } from "sonner";
 import { useScrape } from "@/lib/scrape-store";
 import type { ScrapedFile } from "@/lib/scrape-store";
@@ -22,9 +22,11 @@ import {
     DialogHeader,
     DialogTitle,
     DialogFooter,
+    DialogDescription,
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
-import { downloadFile } from "../lib/download";
+import { Input } from "@/components/ui/input";
+import { downloadFile as downloadFileFromBackend } from "../lib/download";
 
 export const Route = createFileRoute("/files")({
     head: () => ({
@@ -41,12 +43,14 @@ export const Route = createFileRoute("/files")({
             },
             {
                 property: "og:description",
-                content: "Browse, download, and delete your scraped Amazon CSV exports.",
+                content: "Browse, download, and manage your scraped Amazon CSV exports.",
             },
         ],
     }),
     component: FilesPage,
 });
+
+const PAGE_SIZE = 10;
 
 function when(timestamp: number) {
     try {
@@ -72,11 +76,24 @@ function when(timestamp: number) {
     }
 }
 
+function validateRenameInput(value: string) {
+    const trimmed = value.trim();
+    if (!trimmed) return "File name cannot be empty.";
+    if (trimmed.length > 180) return "File name is too long.";
+    if (trimmed.includes("/") || trimmed.includes("\\")) {
+        return "File name cannot contain path separators.";
+    }
+    if (!/^[a-zA-Z0-9._ -]+$/.test(trimmed)) {
+        return "Use only letters, numbers, spaces, dots, hyphens, and underscores.";
+    }
+    return null;
+}
+
 function FilesPage() {
     const {
         files,
         deleteFile,
-        downloadFile,
+        renameFile,
         refreshFiles,
         updateFileNote,
     } = useScrape();
@@ -84,8 +101,13 @@ function FilesPage() {
     const [loading, setLoading] = useState(true);
     const [pending, setPending] = useState<ScrapedFile | null>(null);
     const [downloading, setDownloading] = useState<string | null>(null);
+    const [renameTarget, setRenameTarget] = useState<ScrapedFile | null>(null);
+    const [renameValue, setRenameValue] = useState("");
+    const [renaming, setRenaming] = useState(false);
     const [noteDialogOpen, setNoteDialogOpen] = useState(false);
     const [selectedFile, setSelectedFile] = useState<ScrapedFile | null>(null);
+    const [noteDraft, setNoteDraft] = useState("");
+    const [page, setPage] = useState(1);
 
     // Refresh files from backend whenever the Files page is opened.
     useEffect(() => {
@@ -116,20 +138,52 @@ function FilesPage() {
         };
     }, [refreshFiles]);
 
+    const totalPages = Math.max(1, Math.ceil(files.length / PAGE_SIZE));
+
+    useEffect(() => {
+        setPage((current) => Math.min(current, totalPages));
+    }, [totalPages]);
+
+    const visibleFiles = useMemo(() => {
+        const start = (page - 1) * PAGE_SIZE;
+        return files.slice(start, start + PAGE_SIZE);
+    }, [files, page]);
+
+    const renameError = useMemo(() => {
+        const basicError = validateRenameInput(renameValue);
+        if (basicError) return basicError;
+
+        const normalized = (
+            renameValue.trim().toLowerCase().endsWith(".csv")
+                ? renameValue.trim()
+                : `${renameValue.trim()}.csv`
+        ).toLowerCase();
+
+        if (
+            renameTarget &&
+            renameTarget.name.toLowerCase() !== normalized &&
+            files.some(
+                (file) =>
+                    file.id !== renameTarget.id &&
+                    file.name.toLowerCase() === normalized,
+            )
+        ) {
+            return "A file with this name already exists.";
+        }
+
+        return null;
+    }, [files, renameTarget, renameValue]);
+
     const handleDownload = async (file: ScrapedFile) => {
         setDownloading(file.id);
 
         try {
-            await downloadFile(file);
-            toast.success(`Downloading ${file.name}`);
+            await downloadFileFromBackend(file);
         } catch (err) {
-            toast.error(
-                `Download failed: ${
-                    err instanceof Error
-                        ? err.message
-                        : "Backend may be offline."
-                }`,
-            );
+            // downloadFileFromBackend already reports the backend error.
+            if (err instanceof Error) {
+                console.error("Download failed:", err.message);
+            }
         } finally {
             setDownloading(null);
         }
@@ -142,28 +196,50 @@ function FilesPage() {
 
         try {
             await deleteFile(file.id);
-            toast.success("File removed from list");
-        } catch (err) {
-            toast.error(
-                `Delete failed: ${
-                    err instanceof Error ? err.message : "Unknown error"
-                }`,
-            );
-        } finally {
             setPending(null);
+        } catch {
+            // Store displays the backend error toast.
         }
     };
 
     const openNoteDialog = (file: ScrapedFile) => {
         setSelectedFile(file);
+        setNoteDraft(file.note || "");
         setNoteDialogOpen(true);
     };
 
-    const handleSaveNote = async (note: string) => {
+    const handleSaveNote = async () => {
         if (!selectedFile) return;
-        await updateFileNote(selectedFile.id, note);
-        setNoteDialogOpen(false);
-        setSelectedFile(null);
+
+        try {
+            await updateFileNote(selectedFile.id, noteDraft);
+            setNoteDialogOpen(false);
+            setSelectedFile(null);
+            setNoteDraft("");
+        } catch {
+            // Store displays the backend error toast.
+        }
+    };
+
+    const openRenameDialog = (file: ScrapedFile) => {
+        setRenameTarget(file);
+        setRenameValue(file.name);
+    };
+
+    const handleRename = async () => {
+        if (!renameTarget || renameError) return;
+
+        setRenaming(true);
+
+        try {
+            await renameFile(renameTarget.id, renameValue);
+            setRenameTarget(null);
+            setRenameValue("");
+        } catch {
+            // Store displays the backend error toast.
+        } finally {
+            setRenaming(false);
+        }
     };
 
     if (loading) {
@@ -199,23 +275,34 @@ function FilesPage() {
                             <th className="px-4 py-3">File Name</th>
                             <th className="hidden px-4 py-3 sm:table-cell">Rows</th>
                             <th className="px-4 py-3">When</th>
-                            <th className="px-4 py-3">Note</th>  {/* 👈 NEW COLUMN */}
+                            <th className="px-4 py-3">Note</th>
                             <th className="px-4 py-3 text-right">Download / Delete</th>
                         </tr>
                     </thead>
 
                     <tbody>
-                        {files.map((file, index) => (
+                        {visibleFiles.map((file, index) => (
                             <tr
                                 key={file.id}
                                 className="border-b-2 border-border/15 transition-colors last:border-0 hover:bg-accent/25"
                             >
                                 <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                                    {index + 1}
+                                    {(page - 1) * PAGE_SIZE + index + 1}
                                 </td>
 
                                 <td className="px-4 py-3 font-medium">
-                                    {file.name}
+                                    <div className="flex min-w-0 items-center gap-1">
+                                        <span className="truncate">{file.name}</span>
+                                        <button
+                                            type="button"
+                                            onClick={() => openRenameDialog(file)}
+                                            className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
+                                            aria-label={`Rename ${file.name}`}
+                                            title="Rename file"
+                                        >
+                                            <Pencil className="h-3.5 w-3.5" />
+                                        </button>
+                                    </div>
                                 </td>
 
                                 <td className="hidden px-4 py-3 font-mono text-xs sm:table-cell">
@@ -229,7 +316,7 @@ function FilesPage() {
                                 <td className="px-4 py-3">
                                     <div className="flex items-center gap-1">
                                         {file.note ? (
-                                            <span className="text-sm text-muted-foreground line-clamp-1 max-w-[120px]">
+                                            <span className="max-w-[120px] line-clamp-1 text-sm text-muted-foreground">
                                                 {file.note}
                                             </span>
                                         ) : (
@@ -297,6 +384,34 @@ function FilesPage() {
                         )}
                     </tbody>
                 </table>
+
+                {files.length > PAGE_SIZE && (
+                    <div className="flex items-center justify-between border-t-2 border-border/15 px-4 py-3">
+                        <button
+                            type="button"
+                            onClick={() => setPage((current) => Math.max(1, current - 1))}
+                            disabled={page === 1}
+                            aria-label="Previous files"
+                            className="rounded-lg border-2 bg-card p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-35"
+                        >
+                            <ChevronLeft className="h-4 w-4" />
+                        </button>
+
+                        <span className="text-xs text-muted-foreground">
+                            Page {page} of {totalPages}
+                        </span>
+
+                        <button
+                            type="button"
+                            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                            disabled={page === totalPages}
+                            aria-label="Next files"
+                            className="rounded-lg border-2 bg-card p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-35"
+                        >
+                            <ChevronRight className="h-4 w-4" />
+                        </button>
+                    </div>
+                )}
             </section>
 
             {/* DELETE CONFIRMATION */}
@@ -326,6 +441,70 @@ function FilesPage() {
                 </AlertDialogContent>
             </AlertDialog>
 
+            {/* RENAME DIALOG */}
+            <Dialog
+                open={!!renameTarget}
+                onOpenChange={(open) => {
+                    if (!open && !renaming) {
+                        setRenameTarget(null);
+                        setRenameValue("");
+                    }
+                }}
+            >
+                <DialogContent className="border-2 sm:max-w-md">
+                    <DialogHeader>
+                        <DialogTitle>Rename file</DialogTitle>
+                        <DialogDescription>
+                            Enter a unique CSV file name. The database record and the
+                            physical file in the centralized Files folder will both be updated.
+                        </DialogDescription>
+                    </DialogHeader>
+
+                    <div className="space-y-2 py-2">
+                        <Input
+                            value={renameValue}
+                            onChange={(event) => setRenameValue(event.target.value)}
+                            onKeyDown={(event) => {
+                                if (event.key === "Enter" && !renameError && !renaming) {
+                                    void handleRename();
+                                }
+                            }}
+                            autoFocus
+                            disabled={renaming}
+                            aria-invalid={!!renameError}
+                            placeholder="my_scraped_file.csv"
+                        />
+                        <p
+                            className={`text-xs ${
+                                renameError ? "text-destructive" : "text-muted-foreground"
+                            }`}
+                        >
+                            {renameError ||
+                                "The .csv extension will be added automatically if omitted."}
+                        </p>
+                    </div>
+
+                    <DialogFooter>
+                        <button
+                            type="button"
+                            onClick={() => setRenameTarget(null)}
+                            disabled={renaming}
+                            className="rounded-lg border-2 px-4 py-2 text-sm press"
+                        >
+                            Cancel
+                        </button>
+                        <button
+                            type="button"
+                            onClick={() => void handleRename()}
+                            disabled={!!renameError || renaming}
+                            className="rounded-lg border-2 bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                            {renaming ? "Renaming…" : "Rename"}
+                        </button>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
+
             {/* NOTE DIALOG */}
             <Dialog open={noteDialogOpen} onOpenChange={setNoteDialogOpen}>
                 <DialogContent className="border-2">
@@ -336,24 +515,23 @@ function FilesPage() {
                     </DialogHeader>
                     <div className="py-2">
                         <Textarea
-                            defaultValue={selectedFile?.note || ""}
+                            value={noteDraft}
+                            onChange={(event) => setNoteDraft(event.target.value)}
                             placeholder="Add a note about this file..."
                             className="min-h-[100px] resize-y"
-                            id="note-textarea"
                         />
                     </div>
                     <DialogFooter>
                         <button
+                            type="button"
                             onClick={() => setNoteDialogOpen(false)}
                             className="rounded-lg border-2 px-4 py-2 text-sm press"
                         >
                             Cancel
                         </button>
                         <button
-                            onClick={() => {
-                                const textarea = document.getElementById("note-textarea") as HTMLTextAreaElement;
-                                handleSaveNote(textarea.value);
-                            }}
+                            type="button"
+                            onClick={() => void handleSaveNote()}
                             className="rounded-lg border-2 bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] press"
                         >
                             Save Note

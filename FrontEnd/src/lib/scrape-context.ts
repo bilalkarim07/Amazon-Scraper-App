@@ -14,19 +14,22 @@ export type Ctx = {
     column: string;
     threads: number;
     outputName: string;
-    firstPageWait?: number | undefined;
-    nextPageWait?: number | undefined;
-    keywords?: string[] | undefined;
+    firstPageWait?: number;
+    nextPageWait?: number;
+    keywords?: string[];
     marketplace: string;
     currencyCode: string;
     currencySymbol: string;
+    quickScrape?: boolean;
   }) => Promise<void>;
   cancelJob: () => Promise<void>;
   deleteFile: (id: string) => Promise<void>;
+  renameFile: (id: string, filename: string) => Promise<void>;
   downloadFile: (file: ScrapedFile) => Promise<void>;
   refreshFiles: () => Promise<void>;
   refreshQuota: () => Promise<void>;
   resetJob: () => void;
+  updateFileNote: (id: string, note: string) => Promise<void>;
 };
 
 export const ScrapeContext = createContext<Ctx | null>(null);

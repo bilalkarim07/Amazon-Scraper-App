@@ -1,26 +1,22 @@
-""" routes_jobs.py — Job management endpoints. """
+"""routes_jobs.py — Job management endpoints."""
 
 from __future__ import annotations
-from typing import Annotated, Optional
+from typing import Annotated
 import csv
 import io
 from fastapi import APIRouter, Form, HTTPException, UploadFile, File, status
-from fastapi.responses import FileResponse  # Added for download endpoint
+from fastapi.responses import FileResponse
 from application import quota_service
 from application import job_service
 from application import scraper_service
 from application import marketplace_config
-from application import files_service  # Added for file record lookup
+from application import files_service
 from application.models import JobCreateResponse, JobStatusResponse, CancelResponse
 from application.config import DEFAULT_FIRST_PAGE_WAIT, DEFAULT_NEXT_PAGE_WAIT, HEADLESS_MODE
-from application.files_service import sanitize_filename  # <-- Already imported
+from application.files_service import sanitize_filename
 
 router = APIRouter()
 
-
-# ---------------------------------------------------------------------------
-# POST /api/jobs — create and start a job
-# ---------------------------------------------------------------------------
 
 @router.post(
     "/api/jobs",
@@ -41,8 +37,15 @@ async def create_job(
     marketplace: Annotated[str, Form(description="Marketplace identifier")] = "US",
     currency_code: Annotated[str, Form(description="Currency code")] = "USD",
     currency_symbol: Annotated[str, Form(description="Currency symbol")] = "$",
+    quick_scrape: Annotated[bool, Form(description="Run a credit-free Quick Scrape job")] = False,
 ) -> JobCreateResponse:
-    # --- Validate file type ---
+    """Create a scraper job.
+
+    Normal jobs reserve quota before starting. Quick Scrape jobs are intentionally
+    quota-free and are limited to 10 input rows. The existing scraper pipeline is
+    reused; Quick Scrape simply arrives with a one-thread configuration and no
+    quota reservation.
+    """
     if not (file.filename or "").lower().endswith(".csv"):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -56,7 +59,6 @@ async def create_job(
             detail="Uploaded file is empty.",
         )
 
-    # --- Validate CSV Column ---
     try:
         text = csv_bytes.decode("utf-8-sig", errors="ignore")
         first_line = text.splitlines()[0] if text.splitlines() else ""
@@ -69,12 +71,7 @@ async def create_job(
             detail={"error": "INVALID_CSV", "message": f"Failed to parse CSV headers: {str(exc)}"},
         )
 
-    matched_column = None
-    for h in headers:
-        if h.lower() == column.lower():
-            matched_column = h
-            break
-
+    matched_column = next((h for h in headers if h.lower() == column.lower()), None)
     if not matched_column:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -85,17 +82,38 @@ async def create_job(
                 "available_columns": headers,
             },
         )
-
     column = matched_column
 
-    # --- Get total rows from CSV ---
     try:
-        lines = [line for line in text.splitlines() if line.strip()]
-        total_rows = max(0, len(lines) - 1)  # Subtract header row
-    except Exception:
-        total_rows = 0
+        reader = csv.DictReader(io.StringIO(text))
+        rows = list(reader)
+        total_rows = len(rows)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "INVALID_CSV", "message": f"Failed to parse CSV: {str(exc)}"},
+        )
 
-    # --- Validate marketplace ---
+    if total_rows <= 0:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Uploaded CSV contains no data rows.",
+        )
+
+    if quick_scrape:
+        if total_rows > 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "error": "QUICK_SCRAPE_LIMIT",
+                    "message": "Quick Scrape accepts at most 10 Amazon product links.",
+                    "limit": 10,
+                    "requested": total_rows,
+                },
+            )
+        # Backend is authoritative: Quick Scrape always uses one worker.
+        threads = 1
+
     if not marketplace_config.validate_marketplace(marketplace):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -103,14 +121,12 @@ async def create_job(
         )
 
     marketplace_config_obj = marketplace_config.get_marketplace(marketplace)
-
-    # For ALL_EUROPE, currency is auto-detected
     if marketplace == "ALL_EUROPE":
         currency_code = "AUTO"
         currency_symbol = "AUTO"
 
-    # --- RESERVE QUOTA (atomic) ---
-    if total_rows > 0:
+    # Quick Scrape deliberately does NOT reserve quota.
+    if not quick_scrape:
         success, error_msg = quota_service.reserve_quota(total_rows)
         if not success:
             quota = quota_service.get_quota()
@@ -126,49 +142,47 @@ async def create_job(
                     "requested": total_rows,
                 },
             )
-    else:
-        # No rows – reserve 0 (should not happen, but safe)
-        quota_service.reserve_quota(0)
 
-    # --- Validate / sanitise output filename ---
-    output_filename = sanitize_filename(output_filename)  # <-- Changed to use sanitize_filename
-
-    # --- Parse keywords ---
+    output_filename = sanitize_filename(output_filename)
     keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else []
 
-    # --- Create the job record ---
+    # requested_rows is the authoritative quota reservation amount. Keeping it at
+    # zero for Quick Scrape means the existing settlement path performs no quota
+    # mutation after the job completes or is cancelled.
+    requested_rows = 0 if quick_scrape else total_rows
+
     job = job_service.create_job(
         total_rows=total_rows,
         marketplace=marketplace,
         domain=marketplace_config_obj.get("domain") if marketplace_config_obj else None,
         currency_code=currency_code,
         currency_symbol=currency_symbol,
-        requested_rows=total_rows,
+        requested_rows=requested_rows,
     )
     job_id = job["id"]
 
-    # --- Kick off the scraper in the background ---
-    scraper_service.start_job(
-        job_id=job_id,
-        csv_bytes=csv_bytes,
-        column_name=column,
-        threads=threads,
-        first_page_wait=first_page_wait,
-        next_page_wait=next_page_wait,
-        output_filename=output_filename,
-        keywords=keyword_list,
-        headless=headless,
-        marketplace=marketplace,
-        currency_code=currency_code,
-        currency_symbol=currency_symbol,
-    )
+    try:
+        scraper_service.start_job(
+            job_id=job_id,
+            csv_bytes=csv_bytes,
+            column_name=column,
+            threads=threads,
+            first_page_wait=first_page_wait,
+            next_page_wait=next_page_wait,
+            output_filename=output_filename,
+            keywords=keyword_list,
+            headless=headless,
+            marketplace=marketplace,
+            currency_code=currency_code,
+            currency_symbol=currency_symbol,
+        )
+    except Exception:
+        if not quick_scrape:
+            quota_service.release_reserved(job_id, total_rows)
+        raise
 
     return JobCreateResponse(job_id=job_id, status="created")
 
-
-# ---------------------------------------------------------------------------
-# GET /api/jobs/{job_id} — query job status
-# ---------------------------------------------------------------------------
 
 @router.get(
     "/api/jobs/{job_id}",
@@ -179,16 +193,9 @@ async def create_job(
 async def get_job(job_id: str) -> JobStatusResponse:
     job = job_service.get_job(job_id)
     if not job:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job '{job_id}' not found.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
     return JobStatusResponse(**job)
 
-
-# ---------------------------------------------------------------------------
-# POST /api/jobs/{job_id}/cancel — cancel a running job
-# ---------------------------------------------------------------------------
 
 @router.post(
     "/api/jobs/{job_id}/cancel",
@@ -200,30 +207,16 @@ async def get_job(job_id: str) -> JobStatusResponse:
 async def cancel_job(job_id: str) -> CancelResponse:
     job = job_service.get_job(job_id)
     if not job:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job '{job_id}' not found.",
-        )
-
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
     if job.get("status") not in ("running", "created"):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Cannot cancel job with status '{job.get('status')}'. Only running or created jobs can be cancelled.",
         )
-
-    success = scraper_service.cancel_job(job_id)
-    if not success:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to cancel job.",
-        )
-
+    if not scraper_service.cancel_job(job_id):
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to cancel job.")
     return CancelResponse(job_id=job_id, status="cancelling")
 
-
-# ---------------------------------------------------------------------------
-# GET /api/jobs/{job_id}/download — download the output CSV of a job
-# ---------------------------------------------------------------------------
 
 @router.get(
     "/api/jobs/{job_id}/download",
@@ -231,56 +224,20 @@ async def cancel_job(job_id: str) -> CancelResponse:
     summary="Download the output CSV file generated by a job",
 )
 async def download_job_output(job_id: str):
-    """
-    Download the persistent output file associated with a specific job.
-
-    This endpoint resolves the job UUID to the corresponding file record
-    in the files database and streams the CSV file to the client.
-
-    Returns:
-        FileResponse: The CSV file download.
-
-    Raises:
-        404: If the job does not exist, or no file record exists, or the physical file is missing.
-        410: If the file record exists but has been soft-deleted.
-    """
-    # 1. Verify job exists
     job = job_service.get_job(job_id)
     if not job:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Job '{job_id}' not found.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Job '{job_id}' not found.")
 
-    # 2. Find the persistent file record for this job
     file_records = files_service.list_files_by_job(job_id)
     if not file_records:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"No output file found for job '{job_id}'.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"No output file found for job '{job_id}'.")
 
-    # Use the most recent file record (ordered by created_at DESC)
     file_record = file_records[0]
-
-    # 3. Check if file is soft-deleted
     if file_record.get("deleted_at") is not None:
-        raise HTTPException(
-            status_code=status.HTTP_410_GONE,
-            detail="The output file for this job has been deleted.",
-        )
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="The output file for this job has been deleted.")
 
-    # 4. Resolve the physical file path
     file_path = files_service.resolve_file_path(file_record)
     if file_path is None or not file_path.exists():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="The physical output file is missing from disk.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="The physical output file is missing from disk.")
 
-    # 5. Return the file
-    return FileResponse(
-        path=str(file_path),
-        media_type="text/csv",
-        filename=file_record["filename"],
-    )
+    return FileResponse(path=str(file_path), media_type="text/csv", filename=file_record["filename"])
