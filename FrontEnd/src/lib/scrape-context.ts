@@ -14,12 +14,13 @@ export type Ctx = {
     column: string;
     threads: number;
     outputName: string;
-    firstPageWait?: number | undefined;
-    nextPageWait?: number | undefined;
-    keywords?: string[] | undefined;
+    firstPageWait?: number;
+    nextPageWait?: number;
+    keywords?: string[];
     marketplace: string;
     currencyCode: string;
     currencySymbol: string;
+    quickScrape?: boolean;
   }) => Promise<void>;
   cancelJob: () => Promise<void>;
   deleteFile: (id: string) => Promise<void>;
