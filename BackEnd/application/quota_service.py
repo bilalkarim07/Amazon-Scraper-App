@@ -6,6 +6,7 @@ import logging
 
 from application.database import get_connection
 from application.config import DAILY_QUOTA_LIMIT
+from application import job_service  # <-- NEW: for checking quick_scrape
 
 logger = logging.getLogger(__name__)
 
@@ -283,7 +284,15 @@ def settle_quota(job_id: str, requested_rows: int, successful_rows: int) -> None
     """
     Release unused rows that were reserved but not successfully processed.
     Does NOT consume quota because reserve_quota() already added to used.
+
+    For Quick Scrape jobs, this function does nothing (no quota was reserved).
     """
+    # ---- Quick Scrape check ----
+    job = job_service.get_job(job_id)
+    if job and job.get("quick_scrape", False):
+        logger.info("[QUOTA] Skipping quota settlement for quick scrape job %s", job_id)
+        return
+
     if requested_rows <= 0:
         return
     successful_rows = max(0, min(successful_rows, requested_rows))
@@ -295,7 +304,17 @@ def settle_quota(job_id: str, requested_rows: int, successful_rows: int) -> None
 
 
 def release_reserved(job_id: str, requested_rows: int) -> None:
-    """Release all previously reserved quota for a job that failed."""
+    """
+    Release all previously reserved quota for a job that failed.
+
+    For Quick Scrape jobs, this function does nothing (no quota was reserved).
+    """
+    # ---- Quick Scrape check ----
+    job = job_service.get_job(job_id)
+    if job and job.get("quick_scrape", False):
+        logger.info("[QUOTA] Skipping release of reserved quota for quick scrape job %s", job_id)
+        return
+
     if requested_rows <= 0:
         return
     release_quota(requested_rows)

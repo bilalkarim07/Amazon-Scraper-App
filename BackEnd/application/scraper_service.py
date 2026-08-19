@@ -42,6 +42,7 @@ def start_job(
     marketplace: str = "US",
     currency_code: str = "USD",
     currency_symbol: str = "$",
+    quick_scrape: bool = False,  # <-- NEW: accept the flag (currently unused but required for compatibility)
 ) -> None:
     """Prepare the job workspace and launch the scraper in a background thread."""
     # Use centralized Jobs directory
@@ -68,6 +69,7 @@ def start_job(
             job_id, job_dir, input_csv_path, output_csv_path,
             threads, first_page_wait, next_page_wait, keywords or [], headless,
             marketplace, currency_code, currency_symbol,
+            quick_scrape,  # <-- pass the flag (will be ignored)
         ),
         daemon=True,
         name=f"scraper-{job_id[:8]}",
@@ -148,6 +150,7 @@ def _run_engine(
     marketplace: str,
     currency_code: str,
     currency_symbol: str,
+    quick_scrape: bool,  # <-- NEW: accepted but currently unused
 ) -> None:
     """
     Run the ScraperEngine subprocess, then settle quota based on successful rows.

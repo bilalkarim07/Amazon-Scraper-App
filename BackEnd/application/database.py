@@ -23,7 +23,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     currency_symbol TEXT,
     requested_rows INTEGER DEFAULT 0,
     quota_used INTEGER DEFAULT 0,
-    quota_settled INTEGER DEFAULT 0
+    quota_settled INTEGER DEFAULT 0,
+    quick_scrape INTEGER DEFAULT 0   -- 👈 NEW COLUMN
 );
 """
 
@@ -47,11 +48,12 @@ def init_db() -> None:
         conn.execute(_CREATE_QUOTA_TABLE)
 
         # Add new columns to jobs if they don't exist
-        for col in ["requested_rows", "quota_used", "quota_settled"]:
+        # Include 'quick_scrape' in the list
+        for col in ["requested_rows", "quota_used", "quota_settled", "quick_scrape"]:
             try:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {col} INTEGER DEFAULT 0")
             except sqlite3.OperationalError:
-                pass
+                pass  # Column already exists
 
         # Add reserved column to quota if not exists
         try:

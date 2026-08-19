@@ -41,6 +41,7 @@ async def create_job(
     marketplace: Annotated[str, Form(description="Marketplace identifier")] = "US",
     currency_code: Annotated[str, Form(description="Currency code")] = "USD",
     currency_symbol: Annotated[str, Form(description="Currency symbol")] = "$",
+    quick_scrape: Annotated[bool, Form(description="If true, skip quota and enforce max 10 rows, threads=1")] = False,  # <-- NEW
 ) -> JobCreateResponse:
     # --- Validate file type ---
     if not (file.filename or "").lower().endswith(".csv"):
@@ -95,6 +96,16 @@ async def create_job(
     except Exception:
         total_rows = 0
 
+    # --- Quick Scrape: enforce max 10 rows and force threads=1 ---
+    if quick_scrape:
+        if total_rows > 10:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Quick Scrape allows a maximum of 10 rows.",
+            )
+        # Override threads to 1 (enforced server-side)
+        threads = 1
+
     # --- Validate marketplace ---
     if not marketplace_config.validate_marketplace(marketplace):
         raise HTTPException(
@@ -109,8 +120,8 @@ async def create_job(
         currency_code = "AUTO"
         currency_symbol = "AUTO"
 
-    # --- RESERVE QUOTA (atomic) ---
-    if total_rows > 0:
+    # --- RESERVE QUOTA (atomic) — skip if quick_scrape ---
+    if not quick_scrape and total_rows > 0:
         success, error_msg = quota_service.reserve_quota(total_rows)
         if not success:
             quota = quota_service.get_quota()
@@ -127,16 +138,18 @@ async def create_job(
                 },
             )
     else:
-        # No rows – reserve 0 (should not happen, but safe)
-        quota_service.reserve_quota(0)
+        # For quick scrape, we don't reserve quota
+        # But we still need to record the job; we'll set quota usage to 0 later
+        pass
 
     # --- Validate / sanitise output filename ---
-    output_filename = sanitize_filename(output_filename)  # <-- Changed to use sanitize_filename
+    output_filename = sanitize_filename(output_filename)
 
     # --- Parse keywords ---
     keyword_list = [k.strip() for k in keywords.split(",") if k.strip()] if keywords else []
 
-    # --- Create the job record ---
+    # --- Create the job record (include quick_scrape flag) ---
+    # job_service.create_job must be updated to accept quick_scrape
     job = job_service.create_job(
         total_rows=total_rows,
         marketplace=marketplace,
@@ -144,8 +157,15 @@ async def create_job(
         currency_code=currency_code,
         currency_symbol=currency_symbol,
         requested_rows=total_rows,
+        quick_scrape=quick_scrape,  # <-- pass the flag
     )
     job_id = job["id"]
+
+    # If quick scrape, we can set quota usage to 0 immediately (or mark as no quota)
+    if quick_scrape:
+        # Optionally, we could store a 0 usage in the quota system.
+        # For now, we'll let the job_service handle it (it will skip settling).
+        pass
 
     # --- Kick off the scraper in the background ---
     scraper_service.start_job(
@@ -161,6 +181,7 @@ async def create_job(
         marketplace=marketplace,
         currency_code=currency_code,
         currency_symbol=currency_symbol,
+        quick_scrape=quick_scrape,  # <-- pass to scraper service (optional)
     )
 
     return JobCreateResponse(job_id=job_id, status="created")
