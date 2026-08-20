@@ -334,6 +334,1019 @@ def extract_top_highlight_container(soup):
         )
 
 # ============================================================================
+# BUY BOX EXTRACTION (ENHANCED)
+# ============================================================================
+
+# ----------------------------------------------------------------------------
+# Constants
+# ----------------------------------------------------------------------------
+
+NOT_MENTIONED = "Not Mentioned"
+
+BUYBOX_ID = "buyBoxAccordion"
+BUYBOX_ATTRIBUTE = "buybox-accordion"
+OFFER_ROW_ATTRIBUTE = "data-buying-option-index"
+
+# ----------------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------------
+
+def clean_text(value):
+    """
+    Normalize text safely.
+    """
+    if value is None:
+        return NOT_MENTIONED
+
+    try:
+        text = value.get_text(" ", strip=True)
+    except AttributeError:
+        text = str(value).strip()
+
+    text = re.sub(r"\s+", " ", text).strip()
+
+    return text if text else NOT_MENTIONED
+
+
+def is_valid(value):
+    """
+    Determine whether an extracted value is actually usable.
+    """
+    if value is None:
+        return False
+
+    value = str(value).strip()
+
+    if not value:
+        return False
+
+    return value.lower() not in {
+        "not mentioned",
+        "none",
+        "null",
+        "nan",
+        "n/a",
+        "na",
+    }
+
+
+def first_valid(*values):
+    """
+    Return the first usable value.
+    """
+    for value in values:
+        if is_valid(value):
+            return str(value).strip()
+
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Buy Box Detection
+# ----------------------------------------------------------------------------
+
+def detect_buybox_exact(soup):
+    """
+    LOGIC #1: Exact Amazon Buy Box ID.
+    """
+    container = soup.find("div", id=BUYBOX_ID)
+    if container:
+        logger.info("[BUYBOX SUCCESS #1] Exact #buyBoxAccordion detected.")
+    return container
+
+
+def detect_buybox_attribute(soup):
+    """
+    LOGIC #2: Amazon Buy Box semantic attribute.
+    """
+    container = soup.find(
+        "div",
+        attrs={"data-a-accordion-name": BUYBOX_ATTRIBUTE}
+    )
+    if container:
+        logger.info(
+            "[BUYBOX SUCCESS #2] data-a-accordion-name='buybox-accordion' detected."
+        )
+    return container
+
+
+def detect_buybox_structure(soup):
+    """
+    LOGIC #3: Structural fallback.
+    Requires: a-box-group, a-accordion, and data-buying-option-index.
+    """
+    candidates = soup.find_all(
+        "div",
+        class_=lambda classes: (
+            classes
+            and "a-box-group" in classes
+            and "a-accordion" in classes
+        )
+    )
+
+    for candidate in candidates:
+        rows = candidate.find_all(
+            "div",
+            attrs={OFFER_ROW_ATTRIBUTE: True}
+        )
+        if rows:
+            logger.info(
+                "[BUYBOX SUCCESS #3] Structural Buy Box detected with %d offer row(s).",
+                len(rows)
+            )
+            return candidate
+
+    return None
+
+
+def find_buybox_container(soup):
+    """
+    Try multiple detection patterns.
+    """
+    container = detect_buybox_exact(soup)
+    if container:
+        return container
+
+    container = detect_buybox_attribute(soup)
+    if container:
+        return container
+
+    container = detect_buybox_structure(soup)
+    if container:
+        return container
+
+    logger.warning("[BUYBOX FAILURE] No Buy Box container could be detected.")
+    return None
+
+
+# ----------------------------------------------------------------------------
+# Offer Row Detection
+# ----------------------------------------------------------------------------
+
+def find_offer_rows(container):
+    """
+    Find actual Amazon buying‑option rows.
+    We require: data-buying-option-index.
+    """
+    rows = container.find_all(
+        "div",
+        attrs={OFFER_ROW_ATTRIBUTE: True}
+    )
+
+    # Sort by numeric index.
+    def row_index(row):
+        raw = row.get(OFFER_ROW_ATTRIBUTE)
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 999999
+
+    rows.sort(key=row_index)
+
+    if rows:
+        logger.info(
+            "[BUYBOX SUCCESS #4] Found %d genuine data-buying-option-index row(s).",
+            len(rows)
+        )
+    else:
+        logger.warning(
+            "[BUYBOX FAILURE] Buy Box exists but contains no data-buying-option-index rows."
+        )
+
+    return rows
+
+
+# ----------------------------------------------------------------------------
+# Condition / Offer Name
+# ----------------------------------------------------------------------------
+
+def extract_condition(row):
+    """
+    Extract condition / offer title.
+    Primary: .accordion-caption .a-text-bold
+    Fallbacks: .accordion-caption, span.a-text-bold
+    """
+    # Strategy 1
+    tag = row.select_one(".accordion-caption .a-text-bold")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Condition strategy 1: %s", value)
+        return value
+
+    # Strategy 2
+    tag = row.select_one(".accordion-caption")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Condition strategy 2: %s", value)
+        return value
+
+    # Strategy 3
+    for tag in row.find_all("span", class_="a-text-bold"):
+        value = clean_text(tag)
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Condition strategy 3: %s", value)
+            return value
+
+    logger.warning("[BUYBOX FIELD FAILURE] Condition not found.")
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Price
+# ----------------------------------------------------------------------------
+
+def extract_price(row):
+    """
+    Extract price.
+    Multiple Amazon‑compatible strategies.
+    """
+    # Strategy 1: #corePrice_feature_div .a-price .a-offscreen
+    tag = row.select_one("#corePrice_feature_div .a-price .a-offscreen")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Price strategy 1: %s", value)
+        return value
+
+    # Strategy 2: Any .a-price .a-offscreen
+    tag = row.select_one(".a-price .a-offscreen")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Price strategy 2: %s", value)
+        return value
+
+    # Strategy 3: Build price from Amazon components
+    price = row.select_one(".a-price")
+    if price:
+        symbol = clean_text(price.select_one(".a-price-symbol"))
+        whole = clean_text(price.select_one(".a-price-whole"))
+        fraction = clean_text(price.select_one(".a-price-fraction"))
+
+        if is_valid(whole) and whole != NOT_MENTIONED:
+            whole = re.sub(r"\D+$", "", whole)
+            if is_valid(fraction):
+                value = f"{symbol if is_valid(symbol) else '$'}{whole}.{fraction}"
+            else:
+                value = f"{symbol if is_valid(symbol) else '$'}{whole}"
+
+            if is_valid(value):
+                logger.info("[BUYBOX FIELD SUCCESS] Price strategy 3: %s", value)
+                return value
+
+    # Strategy 4: Regex over price text
+    price_text = clean_text(row.select_one(".a-price"))
+    if is_valid(price_text):
+        match = re.search(r"[$€£₹]\s*[\d,]+(?:\.\d{1,2})?", price_text)
+        if match:
+            value = match.group(0)
+            logger.info("[BUYBOX FIELD SUCCESS] Price strategy 4: %s", value)
+            return value
+
+    logger.warning("[BUYBOX FIELD FAILURE] Price not found.")
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Availability
+# ----------------------------------------------------------------------------
+
+def extract_availability(row):
+    """
+    Extract stock/availability.
+    """
+    # Strategy 1
+    tag = row.select_one("#availability .primary-availability-message")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 1: %s", value)
+        return value
+
+    # Strategy 2
+    tag = row.select_one(".primary-availability-message")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 2: %s", value)
+        return value
+
+    # Strategy 3
+    tag = row.select_one("#availability")
+    value = clean_text(tag)
+    if is_valid(value):
+        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 3: %s", value)
+        return value
+
+    # Strategy 4: Regex fallback
+    text = clean_text(row)
+    match = re.search(
+        r"\b("
+        r"In Stock|"
+        r"Out of Stock|"
+        r"Currently unavailable|"
+        r"Available|"
+        r"Temporarily out of stock"
+        r")\b",
+        text,
+        re.IGNORECASE
+    )
+    if match:
+        value = match.group(1)
+        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 4: %s", value)
+        return value
+
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Delivery
+# ----------------------------------------------------------------------------
+
+def extract_delivery(row):
+    """
+    Extract delivery information.
+    """
+    selectors = [
+        "#deliveryBlockSmallMessage span[data-csa-c-type='element']",
+        "#deliveryBlockMessage span[data-csa-c-type='element']",
+        "#deliveryBlockSmallMessage",
+        "#deliveryBlockMessage",
+    ]
+
+    for idx, selector in enumerate(selectors, start=1):
+        tag = row.select_one(selector)
+        value = clean_text(tag)
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Delivery strategy %d: %s", idx, value)
+            return value
+
+    # Keyword fallback
+    for tag in row.find_all("span"):
+        value = clean_text(tag)
+        if not is_valid(value):
+            continue
+        lower = value.lower()
+        if any(kw in lower for kw in ["delivery", "arrives", "get it by", "shipping"]):
+            logger.info("[BUYBOX FIELD SUCCESS] Delivery keyword fallback: %s", value)
+            return value
+
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Seller / Shipper
+# ----------------------------------------------------------------------------
+
+def extract_seller_info(row):
+    """
+    Extract: Sold by, Ships from
+    Primary pattern: #sfsb_accordion_head -> div.a-row -> span labels/values
+    """
+    sold_by = NOT_MENTIONED
+    shipped_by = NOT_MENTIONED
+
+    # STRATEGY 1: sfsb_accordion_head
+    sfsb = row.select_one("#sfsb_accordion_head")
+    if sfsb:
+        for line in sfsb.select("div.a-row"):
+            spans = line.select("span.a-size-small")
+            if len(spans) < 2:
+                continue
+            label = clean_text(spans[0])
+            value = clean_text(spans[1])
+            if not is_valid(value):
+                continue
+            label_lower = label.lower()
+            if "sold by" in label_lower and sold_by == NOT_MENTIONED:
+                sold_by = value
+                logger.info("[BUYBOX FIELD SUCCESS] Seller strategy 1: %s", sold_by)
+            if "ships from" in label_lower and shipped_by == NOT_MENTIONED:
+                shipped_by = value
+                logger.info("[BUYBOX FIELD SUCCESS] Shipper strategy 1: %s", shipped_by)
+
+    # STRATEGY 2: merchantInfoFeature_feature_div
+    if sold_by == NOT_MENTIONED:
+        merchant = row.select_one("#merchantInfoFeature_feature_div")
+        if merchant:
+            seller_link = merchant.select_one("a#sellerProfileTriggerId")
+            if seller_link:
+                value = clean_text(seller_link)
+                if is_valid(value):
+                    sold_by = value
+                    logger.info("[BUYBOX FIELD SUCCESS] Seller strategy 2: %s", sold_by)
+
+    # STRATEGY 3: fulfillerInfoFeature_feature_div
+    if shipped_by == NOT_MENTIONED:
+        fulfiller = row.select_one("#fulfillerInfoFeature_feature_div")
+        if fulfiller:
+            value_tag = fulfiller.select_one(".offer-display-feature-text-message")
+            value = clean_text(value_tag)
+            if is_valid(value):
+                shipped_by = value
+                logger.info("[BUYBOX FIELD SUCCESS] Shipper strategy 2: %s", shipped_by)
+
+    # STRATEGY 4: Seller profile link
+    if sold_by == NOT_MENTIONED:
+        seller_link = row.select_one("a[href*='/gp/help/seller']")
+        if seller_link:
+            value = clean_text(seller_link)
+            if is_valid(value):
+                sold_by = value
+                logger.info("[BUYBOX FIELD SUCCESS] Seller strategy 3: %s", sold_by)
+
+    # STRATEGY 5: Regex fallback
+    if sold_by == NOT_MENTIONED or shipped_by == NOT_MENTIONED:
+        text = clean_text(sfsb if sfsb else row)
+        if sold_by == NOT_MENTIONED:
+            match = re.search(r"Sold by:\s*(.+?)(?=\s+Ships from:|$)", text, re.IGNORECASE)
+            if match:
+                sold_by = match.group(1).strip()
+                logger.info("[BUYBOX FIELD SUCCESS] Seller regex fallback: %s", sold_by)
+        if shipped_by == NOT_MENTIONED:
+            match = re.search(r"Ships from:\s*(.+?)(?=\s+Sold by:|$)", text, re.IGNORECASE)
+            if match:
+                shipped_by = match.group(1).strip()
+                logger.info("[BUYBOX FIELD SUCCESS] Shipper regex fallback: %s", shipped_by)
+
+    return sold_by, shipped_by
+
+
+# ----------------------------------------------------------------------------
+# Returns
+# ----------------------------------------------------------------------------
+
+def extract_returns(row):
+    """
+    Extract return policy information from the offer row.
+    Strategies:
+      1. Look for <span id="creturns-policy-anchor-text"> – usually contains "FREE Returns"
+      2. Look for offer-display-feature-name="desktop-return-info" label/value
+      3. Look for any text containing "Returns" in offer-display-feature
+      4. Regex fallback on row text
+    """
+    # Strategy 1: explicit anchor
+    anchor = row.select_one("#creturns-policy-anchor-text")
+    if anchor:
+        value = clean_text(anchor)
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Returns strategy 1: %s", value)
+            return value
+
+    # Strategy 2: offer-display-feature-name="desktop-return-info"
+    feature = row.select_one('[offer-display-feature-name="desktop-return-info"]')
+    if feature:
+        # The value is usually in .offer-display-feature-text-message
+        value_tag = feature.select_one(".offer-display-feature-text-message")
+        if value_tag:
+            value = clean_text(value_tag)
+            if is_valid(value):
+                logger.info("[BUYBOX FIELD SUCCESS] Returns strategy 2: %s", value)
+                return value
+        # or fallback to the whole feature text
+        value = clean_text(feature)
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Returns strategy 2 (fallback): %s", value)
+            return value
+
+    # Strategy 3: any span with "Returns" label and a value nearby
+    for label in row.select("span.a-color-tertiary"):
+        if "Return" in label.get_text():
+            # Look for next sibling or parent's next div with feature text
+            parent = label.parent
+            if parent:
+                value_tag = parent.find_next("div", class_="offer-display-feature-text")
+                if value_tag:
+                    value = clean_text(value_tag)
+                    if is_valid(value):
+                        logger.info("[BUYBOX FIELD SUCCESS] Returns strategy 3: %s", value)
+                        return value
+
+    # Strategy 4: text regex
+    text = clean_text(row)
+    match = re.search(r"Returns[:\s]*([^\n]+)", text, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Returns strategy 4: %s", value)
+            return value
+
+    logger.warning("[BUYBOX FIELD FAILURE] Returns not found.")
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Payment
+# ----------------------------------------------------------------------------
+
+def extract_payment(row):
+    """
+    Extract payment/security information.
+    Strategies:
+      1. offer-display-feature-name="desktop-secure-transaction"
+      2. Visible "Secure transaction" text
+      3. Any span with "Payment" label
+      4. Regex fallback
+    """
+    # Strategy 1: feature name
+    feature = row.select_one('[offer-display-feature-name="desktop-secure-transaction"]')
+    if feature:
+        # Often the value is in .offer-display-feature-text-message
+        value_tag = feature.select_one(".offer-display-feature-text-message")
+        if value_tag:
+            value = clean_text(value_tag)
+            if is_valid(value):
+                logger.info("[BUYBOX FIELD SUCCESS] Payment strategy 1: %s", value)
+                return value
+        value = clean_text(feature)
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Payment strategy 1 (fallback): %s", value)
+            return value
+
+    # Strategy 2: any anchor with "Secure transaction" text
+    for anchor in row.select("a.a-popover-trigger"):
+        if "Secure transaction" in anchor.get_text():
+            value = clean_text(anchor)
+            if is_valid(value):
+                logger.info("[BUYBOX FIELD SUCCESS] Payment strategy 2: %s", value)
+                return value
+
+    # Strategy 3: label "Payment" and value
+    for label in row.select("span.a-color-tertiary"):
+        if "Payment" in label.get_text():
+            parent = label.parent
+            if parent:
+                value_tag = parent.find_next("div", class_="offer-display-feature-text")
+                if value_tag:
+                    value = clean_text(value_tag)
+                    if is_valid(value):
+                        logger.info("[BUYBOX FIELD SUCCESS] Payment strategy 3: %s", value)
+                        return value
+
+    # Strategy 4: regex
+    text = clean_text(row)
+    match = re.search(r"Payment[:\s]*([^\n]+)", text, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Payment strategy 4: %s", value)
+            return value
+
+    logger.warning("[BUYBOX FIELD FAILURE] Payment not found.")
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Product Support
+# ----------------------------------------------------------------------------
+
+def extract_product_support(row):
+    """
+    Extract product support information.
+    Strategies:
+      1. offer-display-feature-name="desktop-support-info"
+      2. Any "Product support included" text
+      3. Regex fallback
+    """
+    feature = row.select_one('[offer-display-feature-name="desktop-support-info"]')
+    if feature:
+        value_tag = feature.select_one(".offer-display-feature-text-message")
+        if value_tag:
+            value = clean_text(value_tag)
+            if is_valid(value):
+                logger.info("[BUYBOX FIELD SUCCESS] Product support strategy 1: %s", value)
+                return value
+        value = clean_text(feature)
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Product support strategy 1 (fallback): %s", value)
+            return value
+
+    # Label approach
+    for label in row.select("span.a-color-tertiary"):
+        if "Support" in label.get_text():
+            parent = label.parent
+            if parent:
+                value_tag = parent.find_next("div", class_="offer-display-feature-text")
+                if value_tag:
+                    value = clean_text(value_tag)
+                    if is_valid(value):
+                        logger.info("[BUYBOX FIELD SUCCESS] Product support strategy 2: %s", value)
+                        return value
+
+    text = clean_text(row)
+    match = re.search(r"Product support[:\s]*([^\n]+)", text, re.IGNORECASE)
+    if match:
+        value = match.group(1).strip()
+        if is_valid(value):
+            logger.info("[BUYBOX FIELD SUCCESS] Product support strategy 3: %s", value)
+            return value
+
+    logger.warning("[BUYBOX FIELD FAILURE] Product support not found.")
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Offer Title Link
+# ----------------------------------------------------------------------------
+
+def extract_title_link(row):
+    """
+    Extract an offer-specific URL associated with the title/condition.
+    Strategies:
+      1. Look for an anchor inside .accordion-caption or nearby that is not a popover trigger.
+      2. Look for an anchor with href containing '/dp/' or '/gp/offer-listing/' inside the row.
+      3. Look for any link in offer-display-features container.
+      4. Fallback to generic product link? No, we avoid that.
+    """
+    # Strategy 1: Find anchor in accordion-caption
+    caption = row.select_one(".accordion-caption")
+    if caption:
+        for a in caption.find_all("a", href=True):
+            href = a.get("href")
+            if href and "javascript" not in href and href != "#":
+                # It might be relative, but we'll return it as is – caller can normalize if needed
+                value = href.strip()
+                if is_valid(value):
+                    logger.info("[BUYBOX FIELD SUCCESS] Title link strategy 1: %s", value)
+                    return value
+
+    # Strategy 2: Search entire row for a link that looks like an offer link
+    for a in row.find_all("a", href=True):
+        href = a.get("href")
+        if href and ("/dp/" in href or "/gp/offer-listing/" in href or "/gp/product/" in href):
+            # Avoid popover triggers (usually have href="javascript:void(0)" or "#")
+            if "javascript" not in href and href != "#":
+                value = href.strip()
+                if is_valid(value):
+                    logger.info("[BUYBOX FIELD SUCCESS] Title link strategy 2: %s", value)
+                    return value
+
+    # Strategy 3: Look for any link in offer-display-features container
+    feature_container = row.select_one(".offer-display-features-container")
+    if feature_container:
+        for a in feature_container.find_all("a", href=True):
+            href = a.get("href")
+            if href and "javascript" not in href and href != "#":
+                value = href.strip()
+                if is_valid(value):
+                    logger.info("[BUYBOX FIELD SUCCESS] Title link strategy 3: %s", value)
+                    return value
+
+    # Strategy 4: Look for a link inside any element with class "a-link-normal" that seems offer-related
+    for a in row.select("a.a-link-normal"):
+        href = a.get("href")
+        if href and "javascript" not in href and href != "#":
+            # Avoid seller profile links (they contain seller ID)
+            if "/gp/help/seller" not in href:
+                value = href.strip()
+                if is_valid(value):
+                    logger.info("[BUYBOX FIELD SUCCESS] Title link strategy 4: %s", value)
+                    return value
+
+    logger.warning("[BUYBOX FIELD FAILURE] Title link not found.")
+    return NOT_MENTIONED
+
+
+# ----------------------------------------------------------------------------
+# Active Buy Box Detection
+# ----------------------------------------------------------------------------
+
+def is_active_buybox_row(row):
+    """
+    Determine whether Amazon marked this buying option as active.
+    """
+    classes = row.get("class", [])
+    if "a-accordion-active" in classes:
+        return True
+    if row.get("data-csa-c-is-in-initial-active-row") == "true":
+        return True
+    if row.select_one('[data-csa-c-is-in-initial-active-row="true"]'):
+        return True
+    return False
+
+
+# ----------------------------------------------------------------------------
+# Offer Validation
+# ----------------------------------------------------------------------------
+
+def validate_offer(offer):
+    """
+    Validate an extracted offer.
+    A valid Amazon offer should have at least:
+        condition/title OR price OR seller
+    """
+    successful_fields = []
+
+    if is_valid(offer.get("title")):
+        successful_fields.append("condition")
+    if is_valid(offer.get("price")):
+        successful_fields.append("price")
+    if is_valid(offer.get("availability")):
+        successful_fields.append("availability")
+    if is_valid(offer.get("delivery")):
+        successful_fields.append("delivery")
+    if is_valid(offer.get("sold_by")):
+        successful_fields.append("seller")
+    if is_valid(offer.get("shipped_by")):
+        successful_fields.append("shipper")
+
+    valid = len(successful_fields) >= 2
+
+    if valid:
+        logger.info("[BUYBOX SUCCESS #8] Offer validated: %s", ", ".join(successful_fields))
+    else:
+        logger.warning("[BUYBOX FAILURE] Offer rejected. Only detected: %s", ", ".join(successful_fields))
+
+    return valid, successful_fields
+
+
+# ----------------------------------------------------------------------------
+# Single Offer Extraction
+# ----------------------------------------------------------------------------
+
+def extract_single_offer(row):
+    """
+    Extract one Amazon buying option, including all fields needed for the formatted output.
+    """
+    index = row.get(OFFER_ROW_ATTRIBUTE, NOT_MENTIONED)
+
+    # Existing basic fields
+    title = extract_condition(row)
+    price = extract_price(row)
+    availability = extract_availability(row)
+    delivery = extract_delivery(row)
+    sold_by, shipped_by = extract_seller_info(row)
+
+    # New fields
+    title_link = extract_title_link(row)
+    returns = extract_returns(row)
+    payment = extract_payment(row)
+    product_support = extract_product_support(row)
+
+    offer = {
+        "index": index,
+        "title": title,
+        "title_link": title_link,
+        "price": price,
+        "availability": availability,
+        "delivery": delivery,
+        "sold_by": sold_by,
+        "shipped_by": shipped_by,
+        "condition": title,               # Usually same as title, but kept explicit
+        "returns": returns,
+        "payment": payment,
+        "product_support": product_support,
+        "active": is_active_buybox_row(row),
+    }
+
+    valid, successful_fields = validate_offer(offer)
+    offer["valid"] = valid
+    offer["successful_fields"] = successful_fields
+
+    return offer
+
+
+# ----------------------------------------------------------------------------
+# High‑Level Buy Box Extraction
+# ----------------------------------------------------------------------------
+
+def extract_buybox(soup):
+    """
+    Main Buy Box extraction function.
+    Returns a dict with:
+        offers, primary, active_index, offer_count, success, success_details
+    """
+    result = {
+        "offers": [],
+        "primary": None,
+        "active_index": NOT_MENTIONED,
+        "offer_count": 0,
+        "success": False,
+        "success_details": [],
+    }
+
+    # 1. Find container
+    container = find_buybox_container(soup)
+    if not container:
+        return result
+
+    result["success_details"].append("Buy Box container detected")
+
+    # 2. Validate container
+    has_buybox_attribute = container.get("data-a-accordion-name") == BUYBOX_ATTRIBUTE
+    has_buying_rows = bool(container.find("div", attrs={OFFER_ROW_ATTRIBUTE: True}))
+
+    if has_buybox_attribute:
+        result["success_details"].append("Amazon buybox-accordion attribute validated")
+    if has_buying_rows:
+        result["success_details"].append("Buying-option rows validated")
+
+    # 3. Get rows
+    rows = find_offer_rows(container)
+    if not rows:
+        return result
+
+    # 4. Extract offers
+    seen_indexes = set()  # deduplicate based on index only
+
+    for row in rows:
+        try:
+            offer = extract_single_offer(row)
+            if not offer["valid"]:
+                continue
+
+            # Deduplicate based on index ONLY
+            idx = offer.get("index")
+            if idx is None or idx == NOT_MENTIONED:
+                logger.warning("[BUYBOX] Offer row has no data-buying-option-index – skipping")
+                continue
+
+            if idx in seen_indexes:
+                logger.warning("[BUYBOX] Duplicate accordion row skipped: %s", idx)
+                continue
+
+            seen_indexes.add(idx)
+            result["offers"].append(offer)
+
+            logger.info(
+                "[BUYBOX OFFER %s] title=%s | price=%s | shipper=%s | seller=%s | condition=%s | returns=%s | payment=%s | delivery=%s",
+                idx,
+                offer.get("title"),
+                offer.get("price"),
+                offer.get("shipped_by"),
+                offer.get("sold_by"),
+                offer.get("condition"),
+                offer.get("returns"),
+                offer.get("payment"),
+                offer.get("delivery"),
+            )
+
+        except Exception as exc:
+            logger.exception("[BUYBOX] Offer extraction failed: %s", exc)
+
+    # 5. Count
+    result["offer_count"] = len(result["offers"])
+    if result["offer_count"] > 0:
+        result["success_details"].append(f"{result['offer_count']} valid offer(s) extracted")
+
+    # 6. Find active offer
+    active_offer = next((o for o in result["offers"] if o.get("active")), None)
+
+    # 7. Fallback to first valid offer
+    if active_offer:
+        result["primary"] = active_offer
+        result["active_index"] = active_offer.get("index", NOT_MENTIONED)
+        result["success_details"].append("Active Buy Box row identified")
+    elif result["offers"]:
+        result["primary"] = result["offers"][0]
+        result["active_index"] = result["offers"][0].get("index", NOT_MENTIONED)
+        result["success_details"].append("Active row not explicitly marked; first valid offer used as fallback")
+
+    # 8. Final success
+    if result["offer_count"] > 0 and result["primary"] is not None:
+        result["success"] = True
+        logger.info(
+            "[BUYBOX SUCCESS FINAL] Buy Box successfully extracted. Offers=%d ActiveIndex=%s",
+            result["offer_count"],
+            result["active_index"]
+        )
+    else:
+        logger.warning("[BUYBOX FINAL FAILURE] No valid Buy Box offer could be extracted.")
+
+    return result
+
+
+# ----------------------------------------------------------------------------
+# Output Formatters
+# ----------------------------------------------------------------------------
+
+def format_offer_lines(offers, field):
+    values = []
+    for offer in offers:
+        value = offer.get(field, NOT_MENTIONED)
+        if is_valid(value):
+            values.append(str(value).strip())
+    return "\n".join(values) if values else NOT_MENTIONED
+
+
+def format_buybox_full(offers):
+    if not offers:
+        return NOT_MENTIONED
+
+    blocks = []
+    for number, offer in enumerate(offers, start=1):
+        blocks.append(
+            "\n".join([
+                f"Offer {number}",
+                f"Index: {offer.get('index', NOT_MENTIONED)}",
+                f"Condition: {offer.get('title', NOT_MENTIONED)}",
+                f"Price: {offer.get('price', NOT_MENTIONED)}",
+                f"Availability: {offer.get('availability', NOT_MENTIONED)}",
+                f"Delivery: {offer.get('delivery', NOT_MENTIONED)}",
+                f"Sold by: {offer.get('sold_by', NOT_MENTIONED)}",
+                f"Shipped by: {offer.get('shipped_by', NOT_MENTIONED)}",
+                f"Active: {offer.get('active', False)}",
+            ])
+        )
+
+    return "\n\n" + ("\n\n----------------------------------------\n\n").join(blocks)
+
+
+def format_buybox_formatted_offers(offers):
+    """
+    Format a list of offer dicts into a rich human-readable string.
+    Each offer is displayed with all fields except Link and Payment (removed per user request).
+    """
+    if not offers:
+        return NOT_MENTIONED
+
+    blocks = []
+    for number, offer in enumerate(offers, start=1):
+        block_lines = [
+            f"Offer {number}",
+            f"Title: {offer.get('title', NOT_MENTIONED)}",
+            f"Price: {offer.get('price', NOT_MENTIONED)}",
+            f"Ships from: {offer.get('shipped_by', NOT_MENTIONED)}",
+            f"Sold by: {offer.get('sold_by', NOT_MENTIONED)}",
+            f"Condition: {offer.get('condition', NOT_MENTIONED)}",
+            f"Returns: {offer.get('returns', NOT_MENTIONED)}",
+            f"Delivery: {offer.get('delivery', NOT_MENTIONED)}",
+            f"Availability: {offer.get('availability', NOT_MENTIONED)}",
+            f"Product Support: {offer.get('product_support', NOT_MENTIONED)}",
+        ]
+        blocks.append("\n".join(block_lines))
+
+    return "\n\n----------------------------------------\n\n".join(blocks)
+
+
+# ----------------------------------------------------------------------------
+# Product Data Mapping
+# ----------------------------------------------------------------------------
+
+def map_buybox_to_product_data(data, buybox):
+    """
+    Populate all BuyBox fields in the data dictionary.
+    This includes the new "BuyBox Formatted Offers" column.
+    """
+    offers = buybox.get("offers", [])
+    primary = buybox.get("primary")
+
+    # Initialize all fields
+    data["BuyBox"] = NOT_MENTIONED
+    data["BuyBox_Offers"] = NOT_MENTIONED
+    data["BuyBox_Offer_Count"] = 0
+    data["BuyBox_Prices"] = NOT_MENTIONED
+    data["BuyBox_Sellers"] = NOT_MENTIONED
+
+    data["BuyBox_Title"] = NOT_MENTIONED
+    data["BuyBox_Price"] = NOT_MENTIONED
+    data["BuyBox_Availability"] = NOT_MENTIONED
+    data["BuyBox_Delivery"] = NOT_MENTIONED
+    data["BuyBox_Sold_By"] = NOT_MENTIONED
+    data["BuyBox_Shipped_By"] = NOT_MENTIONED
+
+    data["BuyBox_Active_Index"] = NOT_MENTIONED
+    data["BuyBox_Success"] = False
+    data["BuyBox_Success_Details"] = NOT_MENTIONED
+
+    # New field
+    data["BuyBox Formatted Offers"] = NOT_MENTIONED
+
+    if not offers:
+        return data
+
+    # All offers
+    data["BuyBox"] = format_buybox_full(offers)
+    data["BuyBox_Offers"] = format_offer_lines(offers, "title")
+    data["BuyBox_Offer_Count"] = len(offers)
+    data["BuyBox_Prices"] = format_offer_lines(offers, "price")
+    data["BuyBox_Sellers"] = format_offer_lines(offers, "sold_by")
+
+    # New formatted offers (without Link and Payment)
+    data["BuyBox Formatted Offers"] = format_buybox_formatted_offers(offers)
+
+    # Primary/active offer
+    if primary:
+        data["BuyBox_Title"] = primary.get("title", NOT_MENTIONED)
+        data["BuyBox_Price"] = primary.get("price", NOT_MENTIONED)
+        data["BuyBox_Availability"] = primary.get("availability", NOT_MENTIONED)
+        data["BuyBox_Delivery"] = primary.get("delivery", NOT_MENTIONED)
+        data["BuyBox_Sold_By"] = primary.get("sold_by", NOT_MENTIONED)
+        data["BuyBox_Shipped_By"] = primary.get("shipped_by", NOT_MENTIONED)
+        data["BuyBox_Active_Index"] = primary.get("index", NOT_MENTIONED)
+
+    # Success
+    data["BuyBox_Success"] = True
+    details = buybox.get("success_details", [])
+    if details:
+        data["BuyBox_Success_Details"] = " | ".join(details)
+
+    logger.info(
+        "[BUYBOX PRODUCT DATA SUCCESS] Offers=%s | Prices=%s | Sellers=%s",
+        data["BuyBox_Offer_Count"],
+        data["BuyBox_Prices"],
+        data["BuyBox_Sellers"]
+    )
+
+    return data
+
+# ============================================================================
 # Specialized Extraction Functions
 # ============================================================================
 
@@ -1694,6 +2707,17 @@ def _scrape_product_page(driver, url: str, wait: int, cancel_check=None, url_tim
         logger.warning(f"[worker] Error extracting keyword: {e}")
         data['KeyWord'] = 'Not Mentioned'
     logger.info("[worker] extraction: keyword - DONE")
+
+    # ============================================================================
+    # BUY BOX EXTRACTION (ENHANCED)
+    # ============================================================================
+    buybox_data = extract_buybox(soup)
+    data = map_buybox_to_product_data(data, buybox_data)
+
+    logger.info(
+        "[BUYBOX DEBUG] Formatted offers length=%d",
+        len(data.get("BuyBox Formatted Offers", ""))
+    )
 
     # Create and return ProductData object from dictionary
     try:

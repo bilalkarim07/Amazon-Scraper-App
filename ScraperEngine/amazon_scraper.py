@@ -51,9 +51,10 @@ class AmazonScraper:
             "Category", "Sub Category",
             "Display Features", "Merchant",
             'Display Features 1','Comments','Main Product Image','BreadCrumb','Seller Profile','Variations', 'Availability',
-            'KeyWord'
+            'KeyWord','BuyBox_Offers', 'BuyBox_Offer_Count', 'BuyBox_Prices', 'BuyBox_Sellers', 'BuyBox Formatted Offers'
         ]
 
+        # pyrefly: ignore [missing-import]
         from ScraperEngine.scraping.extractor import scrape_product
         self.scrape_function = scrape_product
 

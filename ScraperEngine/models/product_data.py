@@ -43,6 +43,22 @@ COLUMN_MAPPING = {
     'Variations': 'variations',
     'Availability': 'availability',
     'KeyWord': 'raw_keyword_column',
+    # --- Buy Box fields ---
+    'BuyBox_Offers': 'buybox_offers',
+    'BuyBox_Offer_Count': 'buybox_offer_count',
+    'BuyBox_Prices': 'buybox_prices',
+    'BuyBox_Sellers': 'buybox_sellers',
+    'BuyBox_Title': 'buybox_title',
+    'BuyBox_Price': 'buybox_price',
+    'BuyBox_Availability': 'buybox_availability',
+    'BuyBox_Delivery': 'buybox_delivery',
+    'BuyBox_Sold_By': 'buybox_sold_by',
+    'BuyBox_Shipped_By': 'buybox_shipped_by',
+    'BuyBox_Active_Index': 'buybox_active_index',
+    'BuyBox_Success': 'buybox_success',
+    'BuyBox_Success_Details': 'buybox_success_details',
+    # New field
+    'BuyBox Formatted Offers': 'buybox_formatted_offers',
 }
 
 
@@ -103,9 +119,26 @@ class ProductData:
     variations: str = "Not Mentioned"
     availability: str = "Not Mentioned"
     
-    # Status flags (NEW: is_timeout added)
+    # Status flags
     is_fallback: bool = False
     is_timeout: bool = False
+
+    # ---- Buy Box fields ----
+    buybox: str = 'Not Mentioned'                     # Combined full Buy Box text (optional)
+    buybox_offers: str = 'Not Mentioned'              # Condition lines for all offers
+    buybox_offer_count: str = 'Not Mentioned'         # Number of offers (as string)
+    buybox_prices: str = 'Not Mentioned'              # Price lines for all offers
+    buybox_sellers: str = 'Not Mentioned'             # Seller lines for all offers
+    buybox_title: str = 'Not Mentioned'               # Primary offer condition
+    buybox_price: str = 'Not Mentioned'               # Primary offer price
+    buybox_availability: str = 'Not Mentioned'        # Primary offer availability
+    buybox_delivery: str = 'Not Mentioned'            # Primary offer delivery
+    buybox_sold_by: str = 'Not Mentioned'             # Primary offer sold by
+    buybox_shipped_by: str = 'Not Mentioned'          # Primary offer shipped by
+    buybox_active_index: str = 'Not Mentioned'        # Index of active offer
+    buybox_success: str = 'Not Mentioned'             # "True" or "False"
+    buybox_success_details: str = 'Not Mentioned'     # Success details string
+    buybox_formatted_offers: str = 'Not Mentioned'    # New formatted field
     
     # Keyword Information - structured as list of KeywordInformation objects
     keyword_information: List[KeywordInformation] = field(default_factory=list)

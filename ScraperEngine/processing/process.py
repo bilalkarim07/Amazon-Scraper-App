@@ -641,7 +641,8 @@ def finalize_output_dataframe(dataframe):
             'Comments',
             'Availability',
             'Display Features',
-            'Price Box'
+            'Price Box',
+            'Display Features 1'
         ]
 
         existing_to_remove = [
