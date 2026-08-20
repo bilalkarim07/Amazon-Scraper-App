@@ -355,7 +355,7 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
     });
   }, [stopPolling]);
 
-  // ---- startJob ----
+  // ---- startJob (updated to include quickScrape) ----
   const startJob = useCallback(
     async ({
       file,
@@ -370,6 +370,21 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
       marketplace,
       currencyCode,
       currencySymbol,
+      quickScrape, // <-- added
+    }: {
+      file: File;
+      sourceName: string;
+      rows: number;
+      column: string;
+      threads: number;
+      outputName: string;
+      firstPageWait?: number;
+      nextPageWait?: number;
+      keywords?: string[];
+      marketplace: string;
+      currencyCode: string;
+      currencySymbol: string;
+      quickScrape?: boolean; // <-- added
     }) => {
       stopPolling();
 
@@ -391,6 +406,11 @@ export function ScrapeProvider({ children }: { children: ReactNode }) {
         currencyCode,
         currencySymbol,
       });
+
+      // Append quick_scrape flag if provided
+      if (quickScrape !== undefined) {
+        fd.append("quick_scrape", String(quickScrape));
+      }
 
       try {
         const res = await fetch(`${API_BASE}/api/jobs`, { method: "POST", body: fd });

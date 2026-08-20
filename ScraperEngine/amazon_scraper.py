@@ -23,7 +23,7 @@ class AmazonScraper:
         base_url: str = "https://www.amazon.com/",
         currency_code: str = "USD",
         currency_symbol: str = "$",
-        url_timeout: int = 60,  # NEW: per‑URL timeout in seconds
+        url_timeout: int = 60,
     ):
         self.listings = listings
         self.max_threads = min(max(1, max_threads), 5)
@@ -33,8 +33,6 @@ class AmazonScraper:
         self.base_url = base_url
         self.currency_code = currency_code
         self.currency_symbol = currency_symbol
-
-        # NEW: store the per‑URL timeout
         self.url_timeout = url_timeout
 
         if workspace_dir:
@@ -60,6 +58,10 @@ class AmazonScraper:
         self.scrape_function = scrape_product
 
         self._validate_inputs()
+
+    # --------------------------------------------------------------------------
+    # Original methods (unchanged except for the emit_completed fix)
+    # --------------------------------------------------------------------------
 
     def _validate_inputs(self):
         if self.webdriver_file and not os.path.exists(self.webdriver_file):
@@ -147,13 +149,12 @@ class AmazonScraper:
         next_page_wait: int = 5,
         headless: bool = False,
         cancel_check: Optional[Callable[[], bool]] = None,
-        url_timeout: Optional[int] = None,  # NEW: optional override
+        url_timeout: Optional[int] = None,
     ) -> str:
         logger.info("=" * 60)
         logger.info("STARTING AMAZON PRODUCT EXTRACTION")
         logger.info("=" * 60)
 
-        # Use the provided timeout or fall back to the instance default
         timeout = url_timeout if url_timeout is not None else self.url_timeout
         logger.info(f"Per‑URL timeout set to {timeout} seconds")
 
@@ -170,7 +171,6 @@ class AmazonScraper:
         progress_reporter = ProgressReporter(total=total_urls)
         progress_reporter.emit_started()
 
-        # --- Worker exception collection ---
         worker_exceptions = []
         exception_lock = threading.Lock()
 
@@ -178,7 +178,6 @@ class AmazonScraper:
             with exception_lock:
                 worker_exceptions.append(exc)
 
-        # --- Worker result aggregation (now includes timeout) ---
         total_success = 0
         total_timeout = 0
         total_failed = 0
@@ -207,8 +206,8 @@ class AmazonScraper:
                 cancel_check=cancel_check,
                 base_url=self.base_url,
                 exception_callback=record_exception,
-                result_callback=record_worker_result,  # now expects 3 args
-                url_timeout=timeout,  # NEW: pass the timeout to each worker
+                result_callback=record_worker_result,
+                url_timeout=timeout,
             )
             thread = threading.Thread(target=worker.run)
             threads.append(thread)
@@ -222,25 +221,25 @@ class AmazonScraper:
 
         logger.info("All threads completed")
 
-        # --- Check for worker exceptions ---
         if worker_exceptions:
             error_msg = f"Worker thread(s) failed: {worker_exceptions[0]}"
             logger.error(error_msg)
             progress_reporter.emit_failed(error_msg)
             raise RuntimeError(error_msg)
 
-        # --- Emit final aggregated completed event with all counts ---
-        # The progress_reporter now supports timeout_count; we emit all three
-        progress_reporter.emit_completed(
-            total=total_urls,
+        # ==================== FIX ====================
+        # Use emit_completed_with_counts with the correct signature.
+        # The method now accepts (success, failed, total, timeout).
+        progress_reporter.emit_completed_with_counts(
             success=total_success,
-            timeout=total_timeout,
-            failure=total_failed
+            failed=total_failed,
+            total=total_urls,
+            timeout=total_timeout
         )
+        # ============================================
 
         self._merge_results(output_file)
 
-        # --- If output_file still doesn't exist, raise an error ---
         if not os.path.exists(output_file):
             raise RuntimeError("No output file created – all workers failed or produced no data.")
 
@@ -292,7 +291,7 @@ class AmazonScraper:
         base_url: Optional[str] = None,
         currency_code: Optional[str] = None,
         currency_symbol: Optional[str] = None,
-        url_timeout: Optional[int] = None,  # NEW: allow override from caller
+        url_timeout: Optional[int] = None,
     ) -> str:
         final_marketplace = marketplace if marketplace is not None else self.marketplace
         final_base_url = base_url if base_url is not None else self.base_url
@@ -317,7 +316,7 @@ class AmazonScraper:
             next_page_wait=next_page_wait,
             headless=headless,
             cancel_check=cancel_check,
-            url_timeout=final_timeout,  # pass the timeout down
+            url_timeout=final_timeout,
         )
 
         self.process(
@@ -337,3 +336,60 @@ class AmazonScraper:
         logger.info("=" * 60)
 
         return output
+
+    # --------------------------------------------------------------------------
+    # NEW: Dedicated Quick Scrape method
+    # --------------------------------------------------------------------------
+
+    def quick_scrape(
+        self,
+        urls: List[str],
+        output_file: str = 'quick_scrape_output.csv',
+        first_page_wait: int = 150,
+        next_page_wait: int = 5,
+        headless: bool = False,
+        cancel_check: Optional[Callable[[], bool]] = None,
+        url_timeout: Optional[int] = None,
+    ) -> str:
+        """
+        Perform a quick scrape of up to 10 URLs using a single thread.
+        This method is designed for the Quick Scrape feature and does not consume quota.
+        """
+        if not urls:
+            raise ValueError("No URLs provided for quick scrape.")
+        if len(urls) > 10:
+            logger.warning(f"Quick Scrape received {len(urls)} URLs; only the first 10 will be processed.")
+            urls = urls[:10]
+
+        logger.info("=" * 60)
+        logger.info("QUICK SCRAPE STARTED (single‑thread, max 10 URLs)")
+        logger.info("=" * 60)
+
+        # Force single thread
+        original_max_threads = self.max_threads
+        self.max_threads = 1
+
+        # Override listings to be the URL list
+        original_listings = self.listings
+        self.listings = urls
+
+        # Use the existing extract method with forced single thread
+        try:
+            result = self.extract(
+                output_file=output_file,
+                first_page_wait=first_page_wait,
+                next_page_wait=next_page_wait,
+                headless=headless,
+                cancel_check=cancel_check,
+                url_timeout=url_timeout,
+            )
+        finally:
+            # Restore original settings
+            self.max_threads = original_max_threads
+            self.listings = original_listings
+
+        logger.info("=" * 60)
+        logger.info("QUICK SCRAPE COMPLETED (no quota consumed)")
+        logger.info("=" * 60)
+
+        return result

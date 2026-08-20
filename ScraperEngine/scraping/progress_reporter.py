@@ -114,18 +114,24 @@ class ProgressReporter:
     def is_cancelled(self) -> bool:
         return self._cancelled
 
-    def emit_completed_with_counts(self, success: int, failed: int, total: int):
-        """Emit a completed event with detailed success/failure counts."""
+    # ============ CHANGE STARTS HERE ============
+    def emit_completed_with_counts(self, success: int, failed: int, total: int, timeout: int = 0):
+        """
+        Emit a completed event with detailed success/failure/timeout counts.
+        The 'timeout' parameter is added to preserve timeout information.
+        """
         with self._lock:
             data = {
                 "event": "completed",
                 "total": total,
                 "successful": success,
                 "failed": failed,
+                "timeout": timeout,           # Added to keep timeout count
                 "processed": success + failed,
             }
         self._emit(data)
-    
+    # ============ CHANGE ENDS HERE ============
+
     def emit_final_completed(self, total: int, successful: int, failed: int):
         data = {
             "event": "completed",

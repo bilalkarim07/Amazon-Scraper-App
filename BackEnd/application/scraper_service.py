@@ -224,7 +224,9 @@ def _run_engine(
                                 successful_rows = event.get("successful", 0)
                                 # Optional: also capture timeout/failure counts for logging
                                 timeout_count = event.get("timeout", 0)
-                                failure_count = event.get("failure", 0)
+                                # ============ FIX: changed "failure" to "failed" ============
+                                failure_count = event.get("failed", 0)
+                                # =============================================================
                                 logging.info(
                                     f"Engine completed: success={successful_rows}, "
                                     f"timeout={timeout_count}, failure={failure_count}"

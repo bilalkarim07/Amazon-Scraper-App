@@ -26,6 +26,12 @@ import {
 } from "@/components/ui/dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import {
+    Tooltip,
+    TooltipContent,
+    TooltipProvider,
+    TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { downloadFile as downloadFileFromBackend } from "../lib/download";
 
 export const Route = createFileRoute("/files")({
@@ -73,6 +79,22 @@ function when(timestamp: number) {
         });
     } catch {
         return "Unknown";
+    }
+}
+
+function formatFullDate(timestamp: number) {
+    try {
+        return new Date(timestamp).toLocaleString(undefined, {
+            weekday: "short",
+            year: "numeric",
+            month: "long",
+            day: "numeric",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    } catch {
+        return "Unknown date";
     }
 }
 
@@ -254,291 +276,355 @@ function FilesPage() {
     }
 
     return (
-        <main className="mx-auto w-full max-w-4xl px-5 py-10 md:py-16">
-            {/* PAGE TITLE */}
-            <h1 className="title-pop text-3xl md:text-5xl">
-                List of scraped files
-            </h1>
+        <TooltipProvider delayDuration={200}>
+            <main className="mx-auto w-full max-w-4xl px-5 py-10 md:py-16">
+                {/* PAGE TITLE */}
+                <h1 className="title-pop text-3xl md:text-5xl">
+                    List of scraped files
+                </h1>
 
-            {/* FILE COUNT */}
-            <p className="mt-3 text-sm text-muted-foreground">
-                {files.length} file{files.length === 1 ? "" : "s"} stored on this
-                application.
-            </p>
+                {/* FILE COUNT */}
+                <p className="mt-3 text-sm text-muted-foreground">
+                    {files.length} file{files.length === 1 ? "" : "s"} stored on this
+                    application.
+                </p>
 
-            {/* TABLE CARD */}
-            <section className="card-hard mt-8 overflow-hidden">
-                <table className="w-full text-left text-sm">
-                    <thead className="border-b-2 bg-muted/60 font-display">
-                        <tr>
-                            <th className="w-14 px-4 py-3">Sr.No</th>
-                            <th className="px-4 py-3">File Name</th>
-                            <th className="hidden px-4 py-3 sm:table-cell">Rows</th>
-                            <th className="px-4 py-3">When</th>
-                            <th className="px-4 py-3">Note</th>
-                            <th className="px-4 py-3 text-right">Download / Delete</th>
-                        </tr>
-                    </thead>
-
-                    <tbody>
-                        {visibleFiles.map((file, index) => (
-                            <tr
-                                key={file.id}
-                                className="border-b-2 border-border/15 transition-colors last:border-0 hover:bg-accent/25"
-                            >
-                                <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
-                                    {(page - 1) * PAGE_SIZE + index + 1}
-                                </td>
-
-                                <td className="px-4 py-3 font-medium">
-                                    <div className="flex min-w-0 items-center gap-1">
-                                        <span className="truncate">{file.name}</span>
-                                        <button
-                                            type="button"
-                                            onClick={() => openRenameDialog(file)}
-                                            className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
-                                            aria-label={`Rename ${file.name}`}
-                                            title="Rename file"
-                                        >
-                                            <Pencil className="h-3.5 w-3.5" />
-                                        </button>
-                                    </div>
-                                </td>
-
-                                <td className="hidden px-4 py-3 font-mono text-xs sm:table-cell">
-                                    {file.rows}
-                                </td>
-
-                                <td className="px-4 py-3 text-muted-foreground">
-                                    {when(file.createdAt)}
-                                </td>
-
-                                <td className="px-4 py-3">
-                                    <div className="flex items-center gap-1">
-                                        {file.note ? (
-                                            <span className="max-w-[120px] line-clamp-1 text-sm text-muted-foreground">
-                                                {file.note}
-                                            </span>
-                                        ) : (
-                                            <button
-                                                onClick={() => openNoteDialog(file)}
-                                                className="rounded-lg border-2 border-dashed p-1 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
-                                                aria-label="Add note"
-                                            >
-                                                <Plus className="h-4 w-4" />
-                                            </button>
-                                        )}
-                                        {file.note && (
-                                            <button
-                                                onClick={() => openNoteDialog(file)}
-                                                className="rounded-lg p-1 text-muted-foreground hover:text-primary transition-colors"
-                                                aria-label="Edit note"
-                                            >
-                                                <Pencil className="h-3.5 w-3.5" />
-                                            </button>
-                                        )}
-                                    </div>
-                                </td>
-
-                                <td className="px-4 py-3">
-                                    <div className="flex justify-end gap-2">
-                                        {/* DOWNLOAD */}
-                                        <button
-                                            onClick={() => handleDownload(file)}
-                                            disabled={downloading === file.id}
-                                            aria-label={`Download ${file.name}`}
-                                            className="rounded-lg border-2 bg-primary p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:opacity-50"
-                                        >
-                                            {downloading === file.id ? (
-                                                <Loader2 className="h-4 w-4 animate-spin" />
-                                            ) : (
-                                                <Download className="h-4 w-4" />
-                                            )}
-                                        </button>
-
-                                        {/* DELETE */}
-                                        <button
-                                            onClick={() => setPending(file)}
-                                            aria-label={`Delete ${file.name}`}
-                                            className="rounded-lg border-2 bg-card p-2 text-destructive shadow-[2px_2px_0_0_var(--ink)] press"
-                                        >
-                                            <Trash2 className="h-4 w-4" />
-                                        </button>
-                                    </div>
-                                </td>
-                            </tr>
-                        ))}
-
-                        {files.length === 0 && (
+                {/* TABLE CARD */}
+                <section className="card-hard mt-8 overflow-hidden">
+                    <table className="w-full text-left text-sm">
+                        <thead className="border-b-2 bg-muted/60 font-display">
                             <tr>
-                                <td colSpan={6} className="px-4 py-16 text-center">
-                                    <Inbox className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
-                                    <p className="font-display font-semibold">
-                                        No scraped files yet
-                                    </p>
-                                    <p className="text-xs text-muted-foreground">
-                                        Run a scrape and your exports will land here.
-                                    </p>
-                                </td>
+                                <th className="w-14 px-4 py-3">Sr.No</th>
+                                <th className="px-4 py-3">File Name</th>
+                                <th className="hidden px-4 py-3 sm:table-cell">Rows</th>
+                                <th className="px-4 py-3">When</th>
+                                <th className="px-4 py-3">Note</th>
+                                <th className="px-4 py-3 text-right">Download / Delete</th>
                             </tr>
-                        )}
-                    </tbody>
-                </table>
+                        </thead>
 
-                {files.length > PAGE_SIZE && (
-                    <div className="flex items-center justify-between border-t-2 border-border/15 px-4 py-3">
-                        <button
-                            type="button"
-                            onClick={() => setPage((current) => Math.max(1, current - 1))}
-                            disabled={page === 1}
-                            aria-label="Previous files"
-                            className="rounded-lg border-2 bg-card p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-35"
-                        >
-                            <ChevronLeft className="h-4 w-4" />
-                        </button>
+                        <tbody>
+                            {visibleFiles.map((file, index) => (
+                                <tr
+                                    key={file.id}
+                                    className="border-b-2 border-border/15 transition-colors last:border-0 hover:bg-accent/25"
+                                >
+                                    <td className="px-4 py-3 font-mono text-xs text-muted-foreground">
+                                        {(page - 1) * PAGE_SIZE + index + 1}
+                                    </td>
 
-                        <span className="text-xs text-muted-foreground">
-                            Page {page} of {totalPages}
-                        </span>
+                                    <td className="px-4 py-3 font-medium">
+                                        <div className="flex min-w-0 items-center gap-1">
+                                            <span className="truncate">{file.name}</span>
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => openRenameDialog(file)}
+                                                        className="shrink-0 rounded-lg p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-primary"
+                                                        aria-label={`Rename ${file.name}`}
+                                                    >
+                                                        <Pencil className="h-3.5 w-3.5" />
+                                                    </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>
+                                                    <p>Rename file</p>
+                                                </TooltipContent>
+                                            </Tooltip>
+                                        </div>
+                                    </td>
 
-                        <button
-                            type="button"
-                            onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
-                            disabled={page === totalPages}
-                            aria-label="Next files"
-                            className="rounded-lg border-2 bg-card p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-35"
-                        >
-                            <ChevronRight className="h-4 w-4" />
-                        </button>
-                    </div>
-                )}
-            </section>
+                                    <td className="hidden px-4 py-3 font-mono text-xs sm:table-cell">
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <span className="cursor-help">{file.rows}</span>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>This file contains {file.rows} row{file.rows === 1 ? "" : "s"} of scraped data.</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    </td>
 
-            {/* DELETE CONFIRMATION */}
-            <AlertDialog
-                open={!!pending}
-                onOpenChange={(open) => {
-                    if (!open) setPending(null);
-                }}
-            >
-                <AlertDialogContent className="border-2">
-                    <AlertDialogHeader>
-                        <AlertDialogTitle>
-                            Delete {pending?.name}?
-                        </AlertDialogTitle>
-                        <AlertDialogDescription>
-                            This removes the file from the app list. The output CSV on
-                            disk will also be removed according to the backend file
-                            management rules.
-                        </AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                        <AlertDialogCancel>Cancel</AlertDialogCancel>
-                        <AlertDialogAction onClick={handleDelete}>
-                            Remove
-                        </AlertDialogAction>
-                    </AlertDialogFooter>
-                </AlertDialogContent>
-            </AlertDialog>
+                                    <td className="px-4 py-3 text-muted-foreground">
+                                        <Tooltip>
+                                            <TooltipTrigger asChild>
+                                                <span className="cursor-help">
+                                                    {when(file.createdAt)}
+                                                </span>
+                                            </TooltipTrigger>
+                                            <TooltipContent>
+                                                <p>Scraped on {formatFullDate(file.createdAt)}</p>
+                                            </TooltipContent>
+                                        </Tooltip>
+                                    </td>
 
-            {/* RENAME DIALOG */}
-            <Dialog
-                open={!!renameTarget}
-                onOpenChange={(open) => {
-                    if (!open && !renaming) {
-                        setRenameTarget(null);
-                        setRenameValue("");
-                    }
-                }}
-            >
-                <DialogContent className="border-2 sm:max-w-md">
-                    <DialogHeader>
-                        <DialogTitle>Rename file</DialogTitle>
-                        <DialogDescription>
-                            Enter a unique CSV file name. The database record and the
-                            physical file in the centralized Files folder will both be updated.
-                        </DialogDescription>
-                    </DialogHeader>
+                                    <td className="px-4 py-3">
+                                        <div className="flex items-center gap-1">
+                                            {file.note ? (
+                                                <span className="max-w-[120px] line-clamp-1 text-sm text-muted-foreground">
+                                                    {file.note}
+                                                </span>
+                                            ) : (
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <button
+                                                            onClick={() => openNoteDialog(file)}
+                                                            className="rounded-lg border-2 border-dashed p-1 text-muted-foreground hover:border-primary hover:text-primary transition-colors"
+                                                            aria-label="Add note"
+                                                        >
+                                                            <Plus className="h-4 w-4" />
+                                                        </button>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent>
+                                                        <p>Add note</p>
+                                                    </TooltipContent>
+                                                </Tooltip>
+                                            )}
+                                            {file.note && (
+                                                <Tooltip>
+                                                    <TooltipTrigger asChild>
+                                                        <button
+                                                            onClick={() => openNoteDialog(file)}
+                                                            className="rounded-lg p-1 text-muted-foreground hover:text-primary transition-colors"
+                                                            aria-label="Edit note"
+                                                        >
+                                                            <Pencil className="h-3.5 w-3.5" />
+                                                        </button>
+                                                    </TooltipTrigger>
+                                                    <TooltipContent>
+                                                        <p>Edit note</p>
+                                                    </TooltipContent>
+                                                </Tooltip>
+                                            )}
+                                        </div>
+                                    </td>
 
-                    <div className="space-y-2 py-2">
-                        <Input
-                            value={renameValue}
-                            onChange={(event) => setRenameValue(event.target.value)}
-                            onKeyDown={(event) => {
-                                if (event.key === "Enter" && !renameError && !renaming) {
-                                    void handleRename();
-                                }
-                            }}
-                            autoFocus
-                            disabled={renaming}
-                            aria-invalid={!!renameError}
-                            placeholder="my_scraped_file.csv"
-                        />
-                        <p
-                            className={`text-xs ${
-                                renameError ? "text-destructive" : "text-muted-foreground"
-                            }`}
-                        >
-                            {renameError ||
-                                "The .csv extension will be added automatically if omitted."}
-                        </p>
-                    </div>
+                                    <td className="px-4 py-3">
+                                        <div className="flex justify-end gap-2">
+                                            {/* DOWNLOAD */}
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <button
+                                                        onClick={() => handleDownload(file)}
+                                                        disabled={downloading === file.id}
+                                                        aria-label={`Download ${file.name}`}
+                                                        className="rounded-lg border-2 bg-primary p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:opacity-50"
+                                                    >
+                                                        {downloading === file.id ? (
+                                                            <Loader2 className="h-4 w-4 animate-spin" />
+                                                        ) : (
+                                                            <Download className="h-4 w-4" />
+                                                        )}
+                                                    </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>
+                                                    <p>Download file</p>
+                                                </TooltipContent>
+                                            </Tooltip>
 
-                    <DialogFooter>
-                        <button
-                            type="button"
-                            onClick={() => setRenameTarget(null)}
-                            disabled={renaming}
-                            className="rounded-lg border-2 px-4 py-2 text-sm press"
-                        >
-                            Cancel
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleRename()}
-                            disabled={!!renameError || renaming}
-                            className="rounded-lg border-2 bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-50"
-                        >
-                            {renaming ? "Renaming…" : "Rename"}
-                        </button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
+                                            {/* DELETE */}
+                                            <Tooltip>
+                                                <TooltipTrigger asChild>
+                                                    <button
+                                                        onClick={() => setPending(file)}
+                                                        aria-label={`Delete ${file.name}`}
+                                                        className="rounded-lg border-2 bg-card p-2 text-destructive shadow-[2px_2px_0_0_var(--ink)] press"
+                                                    >
+                                                        <Trash2 className="h-4 w-4" />
+                                                    </button>
+                                                </TooltipTrigger>
+                                                <TooltipContent>
+                                                    <p>Delete file</p>
+                                                </TooltipContent>
+                                            </Tooltip>
+                                        </div>
+                                    </td>
+                                </tr>
+                            ))}
 
-            {/* NOTE DIALOG */}
-            <Dialog open={noteDialogOpen} onOpenChange={setNoteDialogOpen}>
-                <DialogContent className="border-2">
-                    <DialogHeader>
-                        <DialogTitle>
-                            {selectedFile?.note ? "Edit Note" : "Add Note"} — {selectedFile?.name}
-                        </DialogTitle>
-                    </DialogHeader>
-                    <div className="py-2">
-                        <Textarea
-                            value={noteDraft}
-                            onChange={(event) => setNoteDraft(event.target.value)}
-                            placeholder="Add a note about this file..."
-                            className="min-h-[100px] resize-y"
-                        />
-                    </div>
-                    <DialogFooter>
-                        <button
-                            type="button"
-                            onClick={() => setNoteDialogOpen(false)}
-                            className="rounded-lg border-2 px-4 py-2 text-sm press"
-                        >
-                            Cancel
-                        </button>
-                        <button
-                            type="button"
-                            onClick={() => void handleSaveNote()}
-                            className="rounded-lg border-2 bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] press"
-                        >
-                            Save Note
-                        </button>
-                    </DialogFooter>
-                </DialogContent>
-            </Dialog>
-        </main>
+                            {files.length === 0 && (
+                                <tr>
+                                    <td colSpan={6} className="px-4 py-16 text-center">
+                                        <Inbox className="mx-auto mb-3 h-8 w-8 text-muted-foreground" />
+                                        <p className="font-display font-semibold">
+                                            No scraped files yet
+                                        </p>
+                                        <p className="text-xs text-muted-foreground">
+                                            Run a scrape and your exports will land here.
+                                        </p>
+                                    </td>
+                                </tr>
+                            )}
+                        </tbody>
+                    </table>
+
+                    {files.length > PAGE_SIZE && (
+                        <div className="flex items-center justify-between border-t-2 border-border/15 px-4 py-3">
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPage((current) => Math.max(1, current - 1))}
+                                        disabled={page === 1}
+                                        aria-label="Previous files"
+                                        className="rounded-lg border-2 bg-card p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-35"
+                                    >
+                                        <ChevronLeft className="h-4 w-4" />
+                                    </button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    <p>Previous page</p>
+                                </TooltipContent>
+                            </Tooltip>
+
+                            <span className="text-xs text-muted-foreground">
+                                Page {page} of {totalPages}
+                            </span>
+
+                            <Tooltip>
+                                <TooltipTrigger asChild>
+                                    <button
+                                        type="button"
+                                        onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
+                                        disabled={page === totalPages}
+                                        aria-label="Next files"
+                                        className="rounded-lg border-2 bg-card p-2 shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-35"
+                                    >
+                                        <ChevronRight className="h-4 w-4" />
+                                    </button>
+                                </TooltipTrigger>
+                                <TooltipContent>
+                                    <p>Next page</p>
+                                </TooltipContent>
+                            </Tooltip>
+                        </div>
+                    )}
+                </section>
+
+                {/* DELETE CONFIRMATION */}
+                <AlertDialog
+                    open={!!pending}
+                    onOpenChange={(open) => {
+                        if (!open) setPending(null);
+                    }}
+                >
+                    <AlertDialogContent className="border-2">
+                        <AlertDialogHeader>
+                            <AlertDialogTitle>
+                                Delete {pending?.name}?
+                            </AlertDialogTitle>
+                            <AlertDialogDescription>
+                                This removes the file from the app list.
+                            </AlertDialogDescription>
+                        </AlertDialogHeader>
+                        <AlertDialogFooter>
+                            <AlertDialogCancel>Cancel</AlertDialogCancel>
+                            <AlertDialogAction onClick={handleDelete}>
+                                Remove
+                            </AlertDialogAction>
+                        </AlertDialogFooter>
+                    </AlertDialogContent>
+                </AlertDialog>
+
+                {/* RENAME DIALOG */}
+                <Dialog
+                    open={!!renameTarget}
+                    onOpenChange={(open) => {
+                        if (!open && !renaming) {
+                            setRenameTarget(null);
+                            setRenameValue("");
+                        }
+                    }}
+                >
+                    <DialogContent className="border-2 sm:max-w-md">
+                        <DialogHeader>
+                            <DialogTitle>Rename file</DialogTitle>
+                            <DialogDescription>
+                                Enter a unique CSV file name. The database record and the
+                                physical file in the centralized Files folder will both be updated.
+                            </DialogDescription>
+                        </DialogHeader>
+
+                        <div className="space-y-2 py-2">
+                            <Input
+                                value={renameValue}
+                                onChange={(event) => setRenameValue(event.target.value)}
+                                onKeyDown={(event) => {
+                                    if (event.key === "Enter" && !renameError && !renaming) {
+                                        void handleRename();
+                                    }
+                                }}
+                                autoFocus
+                                disabled={renaming}
+                                aria-invalid={!!renameError}
+                                placeholder="my_scraped_file.csv"
+                            />
+                            <p
+                                className={`text-xs ${
+                                    renameError ? "text-destructive" : "text-muted-foreground"
+                                }`}
+                            >
+                                {renameError ||
+                                    "The .csv extension will be added automatically if omitted."}
+                            </p>
+                        </div>
+
+                        <DialogFooter>
+                            <button
+                                type="button"
+                                onClick={() => setRenameTarget(null)}
+                                disabled={renaming}
+                                className="rounded-lg border-2 px-4 py-2 text-sm press"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void handleRename()}
+                                disabled={!!renameError || renaming}
+                                className="rounded-lg border-2 bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] press disabled:cursor-not-allowed disabled:opacity-50"
+                            >
+                                {renaming ? "Renaming…" : "Rename"}
+                            </button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+
+                {/* NOTE DIALOG */}
+                <Dialog open={noteDialogOpen} onOpenChange={setNoteDialogOpen}>
+                    <DialogContent className="border-2">
+                        <DialogHeader>
+                            <DialogTitle>
+                                {selectedFile?.note ? "Edit Note" : "Add Note"} — {selectedFile?.name}
+                            </DialogTitle>
+                        </DialogHeader>
+                        <div className="py-2">
+                            <Textarea
+                                value={noteDraft}
+                                onChange={(event) => setNoteDraft(event.target.value)}
+                                placeholder="Add a note about this file..."
+                                className="min-h-[100px] resize-y"
+                            />
+                        </div>
+                        <DialogFooter>
+                            <button
+                                type="button"
+                                onClick={() => setNoteDialogOpen(false)}
+                                className="rounded-lg border-2 px-4 py-2 text-sm press"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={() => void handleSaveNote()}
+                                className="rounded-lg border-2 bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground shadow-[2px_2px_0_0_var(--ink)] press"
+                            >
+                                Save Note
+                            </button>
+                        </DialogFooter>
+                    </DialogContent>
+                </Dialog>
+            </main>
+        </TooltipProvider>
     );
 }
