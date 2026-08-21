@@ -540,8 +540,7 @@ function FilesPage() {
                         <DialogHeader>
                             <DialogTitle>Rename file</DialogTitle>
                             <DialogDescription>
-                                Enter a unique CSV file name. The database record and the
-                                physical file in the centralized Files folder will both be updated.
+                                Enter a unique CSV file name.
                             </DialogDescription>
                         </DialogHeader>
 

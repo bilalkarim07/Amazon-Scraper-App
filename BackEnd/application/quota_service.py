@@ -6,7 +6,7 @@ import logging
 
 from application.database import get_connection
 from application.config import DAILY_QUOTA_LIMIT
-from application import job_service  # <-- NEW: for checking quick_scrape
+from application import job_service
 
 logger = logging.getLogger(__name__)
 
@@ -41,9 +41,6 @@ def check_and_reset_quota() -> dict:
     This function is safe to call from within an existing transaction.
     """
     with get_connection() as conn:
-        # Use BEGIN IMMEDIATE if not already in a transaction
-        # SQLite allows nested BEGIN if we check, but we'll just execute
-        # If already in a transaction, this is a no-op.
         conn.execute("BEGIN IMMEDIATE")
 
         row = conn.execute("""
@@ -52,7 +49,6 @@ def check_and_reset_quota() -> dict:
         """).fetchone()
 
         if not row:
-            # Initialize if missing
             now_utc = _now_utc_iso()
             today = datetime.now(timezone.utc).date().isoformat()
             conn.execute("""
@@ -62,13 +58,11 @@ def check_and_reset_quota() -> dict:
             conn.commit()
             row = conn.execute("SELECT * FROM quota WHERE id = 1").fetchone()
 
-        # Check expiration
         window_start = _parse_iso_to_utc(row["window_started_at"])
         now = datetime.now(timezone.utc)
         elapsed = now - window_start
 
         if elapsed >= timedelta(hours=24):
-            # Window expired → reset
             new_window_start = _now_utc_iso()
             conn.execute("""
                 UPDATE quota
@@ -78,13 +72,10 @@ def check_and_reset_quota() -> dict:
                 WHERE id = 1
             """, (new_window_start,))
             conn.commit()
-
             logger.info(
                 "[QUOTA] Quota window expired (%.1f hours ago); resetting usage to 0",
                 elapsed.total_seconds() / 3600.0
             )
-
-            # Re-fetch updated row
             row = conn.execute("SELECT * FROM quota WHERE id = 1").fetchone()
         else:
             remaining_hours = 24 - elapsed.total_seconds() / 3600.0
@@ -99,7 +90,6 @@ def check_and_reset_quota() -> dict:
 def get_quota() -> dict:
     """Get current quota status, ensuring window is current."""
     quota_row = check_and_reset_quota()
-
     return {
         "daily_limit": quota_row["daily_limit"],
         "used": quota_row["used"],
@@ -115,13 +105,6 @@ def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
     """
     Atomically reserve quota for a job.
 
-    This is the critical atomic operation:
-    - BEGIN IMMEDIATE
-    - Check/reset expired window
-    - Validate remaining quota
-    - Reserve requested rows
-    - COMMIT
-
     Returns (success, error_message).
     """
     if requested_rows <= 0:
@@ -130,8 +113,6 @@ def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
 
-        # 1. Ensure quota window is current (reset if expired)
-        # We need to read the row, check expiration, and update if needed.
         row = conn.execute("""
             SELECT id, daily_limit, used, reserved, window_started_at
             FROM quota WHERE id = 1
@@ -150,13 +131,11 @@ def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
                 FROM quota WHERE id = 1
             """).fetchone()
 
-        # 2. Check expiration
         window_start = _parse_iso_to_utc(row["window_started_at"])
         now = datetime.now(timezone.utc)
         elapsed = now - window_start
 
         if elapsed >= timedelta(hours=24):
-            # Reset
             new_window_start = _now_utc_iso()
             conn.execute("""
                 UPDATE quota
@@ -165,7 +144,6 @@ def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
                     last_updated = CURRENT_TIMESTAMP
                 WHERE id = 1
             """, (new_window_start,))
-            # Re-fetch
             row = conn.execute("""
                 SELECT id, daily_limit, used, reserved, window_started_at
                 FROM quota WHERE id = 1
@@ -174,12 +152,6 @@ def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
 
         daily_limit = row["daily_limit"]
         used = row["used"]
-        reserved = row["reserved"]   # column exists, access directly 
-
-        # 3. Calculate remaining quota
-        # IMPORTANT: The existing system uses `used` as the reservation counter.
-        # `reserved` exists in the schema but is not actively used.
-        # We preserve this behavior.
         remaining = daily_limit - used
 
         if requested_rows > remaining:
@@ -193,7 +165,6 @@ def reserve_quota(requested_rows: int) -> tuple[bool, Optional[str]]:
                 f"Used: {used}, Remaining: {remaining}, Requested: {requested_rows}"
             )
 
-        # 4. Reserve the quota
         conn.execute("""
             UPDATE quota
             SET used = used + ?,
@@ -224,14 +195,13 @@ def release_quota(rows_to_release: int) -> None:
 
 
 def get_quota_for_frontend() -> dict:
-    """Get quota data formatted for frontend display."""
     quota = get_quota()
     return {
         "limit": quota["daily_limit"],
         "used": quota["used"],
         "remaining": quota["remaining"],
         "date": quota["quota_date"],
-        "window_started_at": quota["window_started_at"],  # Optional extra field
+        "window_started_at": quota["window_started_at"],
     }
 
 
@@ -248,7 +218,6 @@ def consume_quota(rows_to_consume: int) -> bool:
     with get_connection() as conn:
         conn.execute("BEGIN IMMEDIATE")
 
-        # Ensure window is current
         row = conn.execute("""
             SELECT daily_limit, used, window_started_at
             FROM quota WHERE id = 1
@@ -282,25 +251,62 @@ def consume_quota(rows_to_consume: int) -> bool:
 
 def settle_quota(job_id: str, requested_rows: int, successful_rows: int) -> None:
     """
-    Release unused rows that were reserved but not successfully processed.
+    Idempotently release unused rows that were reserved but not successfully processed.
     Does NOT consume quota because reserve_quota() already added to used.
 
     For Quick Scrape jobs, this function does nothing (no quota was reserved).
+
+    Uses the job's quota_settled flag to guarantee idempotency.
     """
     # ---- Quick Scrape check ----
     job = job_service.get_job(job_id)
-    if job and job.get("quick_scrape", False):
+    if not job:
+        logger.warning("[QUOTA] Job %s not found; skipping settlement", job_id)
+        return
+    if job.get("quick_scrape", False):
         logger.info("[QUOTA] Skipping quota settlement for quick scrape job %s", job_id)
+        return
+
+    # ---- Idempotency check ----
+    if job.get("quota_settled", 0) == 1:
+        logger.info("[QUOTA] Quota already settled for job %s", job_id)
         return
 
     if requested_rows <= 0:
         return
+
     successful_rows = max(0, min(successful_rows, requested_rows))
     unused_rows = requested_rows - successful_rows
-    if unused_rows > 0:
-        release_quota(unused_rows)
-        logger.info("[QUOTA] Settled job %s: requested=%d, successful=%d, released=%d",
-                    job_id, requested_rows, successful_rows, unused_rows)
+
+    # ---- Perform settlement atomically ----
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+
+        # Release unused rows if any
+        if unused_rows > 0:
+            conn.execute(
+                "UPDATE quota SET used = used - ? WHERE id = 1 AND used >= ?",
+                (unused_rows, unused_rows)
+            )
+            logger.info("[QUOTA] Released %d unused rows for job %s", unused_rows, job_id)
+
+        # Update job: mark quota_settled = 1 and set quota_used = successful_rows
+        # This is the critical idempotency guard.
+        conn.execute(
+            """UPDATE jobs 
+               SET quota_settled = 1, quota_used = ? 
+               WHERE id = ? AND quota_settled = 0""",
+            (successful_rows, job_id)
+        )
+        if conn.total_changes == 0:
+            # Race: another process already settled; rollback to be safe
+            conn.rollback()
+            logger.warning("[QUOTA] Settlement race detected for job %s; rolling back", job_id)
+            return
+
+        conn.commit()
+        logger.info("[QUOTA] Settled job %s: requested=%d, successful=%d, quota_used=%d",
+                    job_id, requested_rows, successful_rows, successful_rows)
 
 
 def release_reserved(job_id: str, requested_rows: int) -> None:
@@ -308,15 +314,31 @@ def release_reserved(job_id: str, requested_rows: int) -> None:
     Release all previously reserved quota for a job that failed.
 
     For Quick Scrape jobs, this function does nothing (no quota was reserved).
+    This function is idempotent via quota_settled.
     """
-    # ---- Quick Scrape check ----
     job = job_service.get_job(job_id)
-    if job and job.get("quick_scrape", False):
+    if not job:
+        return
+    if job.get("quick_scrape", False):
         logger.info("[QUOTA] Skipping release of reserved quota for quick scrape job %s", job_id)
         return
-
+    if job.get("quota_settled", 0) == 1:
+        logger.info("[QUOTA] Quota already settled for job %s; release skipped", job_id)
+        return
     if requested_rows <= 0:
         return
-    release_quota(requested_rows)
+
+    # Atomically release and mark settled
+    with get_connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            "UPDATE quota SET used = used - ? WHERE id = 1 AND used >= ?",
+            (requested_rows, requested_rows)
+        )
+        conn.execute(
+            "UPDATE jobs SET quota_settled = 1, quota_used = 0 WHERE id = ? AND quota_settled = 0",
+            (job_id,)
+        )
+        conn.commit()
     logger.info("[QUOTA] Released all reserved quota for failed job %s: %d rows",
                 job_id, requested_rows)

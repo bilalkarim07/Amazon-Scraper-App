@@ -37,7 +37,7 @@ def create_job(
     currency_code: Optional[str] = None,
     currency_symbol: Optional[str] = None,
     requested_rows: int = 0,
-    quick_scrape: bool = False,  # <-- NEW
+    quick_scrape: bool = False,
 ) -> dict:
     job_id = str(uuid.uuid4())
     now = _now_iso()
@@ -78,6 +78,56 @@ def list_jobs() -> list[dict]:
 def mark_running(job_id: str) -> Optional[dict]:
     return update_job(job_id, status="running", started_at=_now_iso())
 
+def mark_running_if_created(job_id: str) -> Optional[dict]:
+    """
+    Atomically transition from 'created' to 'running' only if the job is still 'created'.
+    Returns the updated job if successful, else None.
+    """
+    now = _now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ? AND status = 'created'",
+            (now, job_id)
+        )
+        if conn.total_changes == 0:
+            return None
+        conn.commit()
+    return get_job(job_id)
+
+def mark_cancelling(job_id: str) -> Optional[dict]:
+    """
+    Transition to 'cancelling' only if current status is 'created' or 'running'.
+    Returns the updated job if successful, else None.
+    """
+    with get_connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET status = 'cancelling' WHERE id = ? AND status IN ('created', 'running')",
+            (job_id,)
+        )
+        if conn.total_changes == 0:
+            return None
+        conn.commit()
+    return get_job(job_id)
+
+def mark_cancelled_if_cancelling(job_id: str, processed_rows: int = 0) -> Optional[dict]:
+    """
+    Atomically transition from 'cancelling' to 'cancelled' only if the job is still 'cancelling'.
+    Also sets cancelled_at and processed_rows.
+    Returns the updated job if successful, else None.
+    """
+    now = _now_iso()
+    with get_connection() as conn:
+        conn.execute(
+            """UPDATE jobs 
+               SET status = 'cancelled', cancelled_at = ?, processed_rows = ? 
+               WHERE id = ? AND status = 'cancelling'""",
+            (now, processed_rows, job_id)
+        )
+        if conn.total_changes == 0:
+            return None
+        conn.commit()
+    return get_job(job_id)
+
 def mark_completed(job_id: str, output_file: str, processed_rows: int) -> Optional[dict]:
     return update_job(
         job_id,
@@ -95,22 +145,15 @@ def mark_failed(job_id: str, error: str) -> Optional[dict]:
         error=error,
     )
 
-def mark_cancelling(job_id: str) -> Optional[dict]:
-    return update_job(job_id, status="cancelling")
-
-def mark_cancelled(job_id: str, processed_rows: int = 0) -> Optional[dict]:
-    return update_job(
-        job_id,
-        status="cancelled",
-        cancelled_at=_now_iso(),
-        processed_rows=processed_rows,
-    )
-
 def update_progress(job_id: str, processed_rows: int) -> Optional[dict]:
     return update_job(job_id, processed_rows=processed_rows)
 
 def update_quota_used(job_id: str, quota_used: int) -> Optional[dict]:
     return update_job(job_id, quota_used=quota_used)
+
+def set_quota_settled(job_id: str) -> Optional[dict]:
+    """Mark quota as settled (idempotent)."""
+    return update_job(job_id, quota_settled=1)
 
 # ---------------------------------------------------------------------------
 # Additional helper to check if a job is quick_scrape (useful for quota settlement)

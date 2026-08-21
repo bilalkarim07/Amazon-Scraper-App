@@ -8,8 +8,11 @@ import logging
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from typing import Optional, Dict
+
+import psutil
 
 from application import config
 from application import job_service
@@ -18,6 +21,7 @@ from application import files_service
 from application.storage import get_app_data_root, get_jobs_dir
 
 _running_processes: Dict[str, subprocess.Popen] = {}
+_process_ready_events: Dict[str, threading.Event] = {}
 _process_lock = threading.Lock()
 
 
@@ -42,10 +46,9 @@ def start_job(
     marketplace: str = "US",
     currency_code: str = "USD",
     currency_symbol: str = "$",
-    quick_scrape: bool = False,  # <-- NEW: accept the flag (currently unused but required for compatibility)
+    quick_scrape: bool = False,
 ) -> None:
     """Prepare the job workspace and launch the scraper in a background thread."""
-    # Use centralized Jobs directory
     jobs_root = get_jobs_dir()
     job_dir = jobs_root / job_id
     job_dir.mkdir(parents=True, exist_ok=True)
@@ -69,7 +72,7 @@ def start_job(
             job_id, job_dir, input_csv_path, output_csv_path,
             threads, first_page_wait, next_page_wait, keywords or [], headless,
             marketplace, currency_code, currency_symbol,
-            quick_scrape,  # <-- pass the flag (will be ignored)
+            quick_scrape,
         ),
         daemon=True,
         name=f"scraper-{job_id[:8]}",
@@ -114,8 +117,6 @@ def _tail_log(path: Path, lines: int = 20) -> str:
         return ""
 
 
-# --- Helpers for cancellation and partial-result counting ---
-
 def _count_successful_rows_from_threads(job_dir: Path) -> int:
     """Count successfully scraped rows from thread CSV files in the workspace."""
     workspace_dir = job_dir / "workspace"
@@ -125,7 +126,6 @@ def _count_successful_rows_from_threads(job_dir: Path) -> int:
     for thread_file in workspace_dir.glob("thread_*.csv"):
         try:
             with open(thread_file, "r", encoding="utf-8") as fh:
-                # Subtract 1 for header row
                 total += max(0, sum(1 for _ in csv.reader(fh)) - 1)
         except Exception:
             continue
@@ -133,8 +133,29 @@ def _count_successful_rows_from_threads(job_dir: Path) -> int:
 
 
 def _is_cancelled(job_dir: Path) -> bool:
-    """Check if the .cancel flag file exists."""
     return (job_dir / ".cancel").exists()
+
+
+def _terminate_process_tree(pid: int) -> None:
+    """Terminate the process and all its children (cross‑platform)."""
+    try:
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            try:
+                child.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        parent.terminate()
+        # Wait up to 5 seconds for graceful termination
+        gone, alive = psutil.wait_procs(children + [parent], timeout=5)
+        for p in alive:
+            try:
+                p.kill()
+            except psutil.NoSuchProcess:
+                pass
+    except psutil.NoSuchProcess:
+        pass
 
 
 def _run_engine(
@@ -150,13 +171,30 @@ def _run_engine(
     marketplace: str,
     currency_code: str,
     currency_symbol: str,
-    quick_scrape: bool,  # <-- NEW: accepted but currently unused
+    quick_scrape: bool,
 ) -> None:
     """
     Run the ScraperEngine subprocess, then settle quota based on successful rows.
     Quota is reconciled using the number of valid successful rows (excluding timeouts and failures).
+    This function does NOT handle cancellation finalization; that is owned by _cancel_worker.
     """
-    job_service.mark_running(job_id)
+    # ---- 1. Check cancellation BEFORE marking running ----
+    if _is_cancelled(job_dir):
+        logging.info(f"Job {job_id} cancelled before engine start; not marking running.")
+        # The cancellation worker will finalize the job.
+        return
+
+    # ---- 2. Atomically transition from 'created' to 'running' ----
+    updated_job = job_service.mark_running_if_created(job_id)
+    if not updated_job:
+        # Another thread already changed state (e.g., cancellation won the race)
+        logging.info(f"Job {job_id} state changed before we could mark running; aborting.")
+        return
+
+    # ---- 3. Create and register process-ready event ----
+    ready_event = threading.Event()
+    with _process_lock:
+        _process_ready_events[job_id] = ready_event
 
     cmd = [
         config.UV_EXECUTABLE, "run", "python", str(config.ENGINE_RUNNER),
@@ -198,6 +236,8 @@ def _run_engine(
 
             with _process_lock:
                 _running_processes[job_id] = proc
+                # Signal that the process is registered
+                ready_event.set()
 
             # Read output line by line to parse progress events
             try:
@@ -220,13 +260,9 @@ def _run_engine(
                                     if current and current.get("total_rows", 0) == 0:
                                         job_service.update_job(job_id, total_rows=total)
                             elif event.get("event") == "completed":
-                                # Extract success count (timeouts and failures are excluded)
                                 successful_rows = event.get("successful", 0)
-                                # Optional: also capture timeout/failure counts for logging
                                 timeout_count = event.get("timeout", 0)
-                                # ============ FIX: changed "failure" to "failed" ============
                                 failure_count = event.get("failed", 0)
-                                # =============================================================
                                 logging.info(
                                     f"Engine completed: success={successful_rows}, "
                                     f"timeout={timeout_count}, failure={failure_count}"
@@ -244,66 +280,26 @@ def _run_engine(
 
             return_code = proc.wait()
 
+            # ---- 4. Remove process from registry and clear event ----
             with _process_lock:
                 _running_processes.pop(job_id, None)
+                _process_ready_events.pop(job_id, None)
 
-            # Determine processed rows for display
-            processed_rows = _count_csv_rows(output_csv_path) if output_csv_path.is_file() else 0
-
-            # Get requested rows from job record
+            # ---- 5. Check if cancellation was requested during the run ----
             job = job_service.get_job(job_id)
-            requested_rows = job.get("requested_rows", 0) if job else 0
-
-            # --- Check if cancellation was requested ---
-            cancellation_requested = _is_cancelled(job_dir)
-
-            # --- If no "completed" event was received, fall back to counting thread files ---
-            if successful_rows == 0 and not cancellation_requested:
-                successful_rows = _count_successful_rows_from_threads(job_dir)
-
-            # --- Handle cancellation ---
-            if cancellation_requested:
-                # Count actual successful rows from thread CSVs (more reliable than progress events)
-                actual_successful = _count_successful_rows_from_threads(job_dir)
-                if actual_successful > 0:
-                    successful_rows = actual_successful
-                # If we have a partial output file, use its row count too (paranoid fallback)
-                if output_csv_path.is_file() and successful_rows == 0:
-                    successful_rows = _count_csv_rows(output_csv_path)
-
-                # --- Finalize partial output to Files/ (with user‑provided base name) ---
-                if output_csv_path.is_file() and successful_rows > 0:
-                    file_record = files_service.finalize_job_output(
-                        job_id=job_id,
-                        job_dir=job_dir,
-                        output_filename=output_csv_path.name,
-                        status="partial",
-                        row_count=successful_rows,
-                        base_name=output_csv_path.name,
-                    )
-                    if file_record:
-                        app_root = get_app_data_root()
-                        try:
-                            relative_output = str(Path(file_record["path"]))
-                        except Exception:
-                            relative_output = file_record["path"]
-                        job_service.update_job(job_id, output_file=relative_output)
-
-                # --- Settle quota for cancelled job ---
-                if requested_rows > 0:
-                    try:
-                        # This releases unused reserved quota and updates quota_used
-                        quota_service.settle_quota(job_id, requested_rows, successful_rows)
-                    except Exception as exc:
-                        logging.error(f"Quota settlement failed for cancelled job {job_id}: {exc}")
-
-                job_service.mark_cancelled(job_id, successful_rows)
+            if job and job.get("status") == "cancelling":
+                # Cancellation worker will handle finalization; just exit.
+                logging.info(f"Job {job_id} was cancelled during engine run; not finalizing.")
                 return
 
-            # --- Normal completion path ---
-            # --- SETTLE QUOTA (idempotent) with error handling ---
-            # quota_service.settle_quota handles releasing unused reserved quota
-            # and updating the job's quota_used and quota_settled fields.
+            # ---- 6. Normal completion / failure path (only if not cancelled) ----
+            requested_rows = job.get("requested_rows", 0) if job else 0
+
+            # If no "completed" event was received, fall back to counting thread files
+            if successful_rows == 0:
+                successful_rows = _count_successful_rows_from_threads(job_dir)
+
+            # Settle quota (idempotent)
             quota_failed = False
             quota_error = None
             if requested_rows > 0:
@@ -314,17 +310,15 @@ def _run_engine(
                     quota_error = str(exc)
                     logging.error(f"Quota settlement failed for job {job_id}: {exc}")
 
-            # --- Update job status ---
+            # Update job status
             if return_code == 0 and output_csv_path.is_file():
                 if quota_failed:
-                    # Scraping succeeded but quota finalization failed.
-                    # Preserve the output CSV but mark job as failed with clear error.
                     job_service.mark_failed(
                         job_id,
                         error=f"Scraping succeeded but quota finalization failed: {quota_error}",
                     )
                 else:
-                    # --- FINALIZE OUTPUT TO FILES DIRECTORY (with user‑provided base name) ---
+                    # Finalize output to Files directory
                     file_record = files_service.finalize_job_output(
                         job_id=job_id,
                         job_dir=job_dir,
@@ -333,53 +327,41 @@ def _run_engine(
                         row_count=successful_rows if successful_rows > 0 else processed_rows,
                         base_name=output_csv_path.name,
                     )
-
                     if file_record:
                         app_root = get_app_data_root()
                         try:
                             relative_output = str(Path(file_record["path"]))
                         except Exception:
                             relative_output = file_record["path"]
-
+                        processed_rows = _count_csv_rows(output_csv_path)
                         job_service.mark_completed(
                             job_id,
                             output_file=relative_output,
                             processed_rows=processed_rows if processed_rows > 0 else successful_rows,
                         )
                     else:
-                        # Fallback: store the job workspace path if finalization failed
                         app_root = get_app_data_root()
                         try:
                             relative_output = str(output_csv_path.relative_to(app_root))
                         except ValueError:
                             relative_output = str(output_csv_path)
-
+                        processed_rows = _count_csv_rows(output_csv_path)
                         job_service.mark_completed(
                             job_id,
                             output_file=relative_output,
                             processed_rows=processed_rows if processed_rows > 0 else successful_rows,
                         )
             else:
-                job = job_service.get_job(job_id)  # refresh
-                if job and job.get("status") == "cancelling":
-                    # Double-check: if status is cancelling but we didn't handle it above
-                    actual_successful = _count_successful_rows_from_threads(job_dir)
-                    if requested_rows > 0:
-                        try:
-                            quota_service.settle_quota(job_id, requested_rows, actual_successful)
-                        except Exception as exc:
-                            logging.error(f"Quota settlement failed for cancelling job {job_id}: {exc}")
-                    job_service.mark_cancelled(job_id, actual_successful)
-                else:
-                    error_snippet = _tail_log(log_path, lines=20)
-                    job_service.mark_failed(
-                        job_id,
-                        error=f"Runner exited with code {return_code}.\n{error_snippet}",
-                    )
+                error_snippet = _tail_log(log_path, lines=20)
+                job_service.mark_failed(
+                    job_id,
+                    error=f"Runner exited with code {return_code}.\n{error_snippet}",
+                )
 
     except Exception as exc:
         with _process_lock:
             _running_processes.pop(job_id, None)
+            _process_ready_events.pop(job_id, None)
         # On exception, release reserved quota (but don't consume)
         job = job_service.get_job(job_id)
         requested = job.get("requested_rows", 0) if job else 0
@@ -392,20 +374,31 @@ def _run_engine(
         job_service.mark_failed(job_id, str(exc))
 
 
+# ---- Cancellation machinery ----
+
 def cancel_job(job_id: str) -> bool:
     """
     Request cancellation of a running job.
-    Creates a .cancel flag file and terminates the subprocess.
-    Returns True if the job was successfully marked as cancelled.
+    Creates a .cancel flag file and starts the cancellation worker.
+    Returns True if the job was successfully marked as cancelling.
     """
     job = job_service.get_job(job_id)
     if not job:
         return False
 
-    if job.get("status") not in ("running", "created"):
+    status = job.get("status")
+    if status not in ("running", "created"):
         return False
 
-    job_service.mark_cancelling(job_id)
+    # Prevent duplicate cancellation threads
+    if status == "cancelling":
+        return True
+
+    # Atomically transition to cancelling (only if still running/created)
+    updated = job_service.mark_cancelling(job_id)
+    if not updated:
+        # Race: job already completed or failed
+        return False
 
     jobs_root = get_jobs_dir()
     job_dir = jobs_root / job_id
@@ -415,18 +408,127 @@ def cancel_job(job_id: str) -> bool:
     except Exception as e:
         logging.warning(f"Could not create .cancel file for job {job_id}: {e}")
 
+    # Start the cancellation worker (background thread)
+    threading.Thread(
+        target=_cancel_worker,
+        args=(job_id,),
+        daemon=True,
+        name=f"cancel-{job_id[:8]}",
+    ).start()
+
+    return True
+
+
+def _cancel_worker(job_id: str) -> None:
+    """
+    Two-phase cancellation:
+    1. Wait for process registration (or timeout).
+    2. If process exists, wait for graceful exit (grace period).
+    3. If still alive, force‑kill the process tree.
+    4. Finalize cancellation (quota, output, status).
+    """
+    grace = config.CANCELLATION_GRACE_PERIOD
+
+    # ---- 1. Wait for process registration ----
+    ready_event = None
+    with _process_lock:
+        ready_event = _process_ready_events.get(job_id)
+    if ready_event is not None:
+        # Wait for the process to be registered, but not longer than the grace period
+        registered = ready_event.wait(timeout=grace)
+        if not registered:
+            logging.warning(f"Job {job_id} process did not register within {grace}s; proceeding without it.")
+            # Proceed with finalization (no process to kill)
+            _finalize_cancellation(job_id)
+            return
+
+    # ---- 2. Get the process ----
+    proc = None
     with _process_lock:
         proc = _running_processes.get(job_id)
 
-    if proc:
-        try:
-            proc.terminate()
-            try:
-                proc.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-        except Exception as e:
-            logging.warning(f"Error terminating subprocess for job {job_id}: {e}")
+    if proc is None:
+        # Process never started or already finished; finalize directly
+        _finalize_cancellation(job_id)
+        return
 
-    return True
+    # ---- 3. Graceful shutdown attempt ----
+    start = time.time()
+    while time.time() - start < grace:
+        poll = proc.poll()
+        if poll is not None:
+            # Process exited on its own
+            break
+        time.sleep(1)
+    else:
+        # Grace period expired → force‑kill the process tree
+        logging.info(f"Force‑terminating process tree for job {job_id} (PID {proc.pid})")
+        _terminate_process_tree(proc.pid)
+        # Wait for the process to be reaped
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+
+    # ---- 4. Clean up process registry (in case _run_engine didn't) ----
+    with _process_lock:
+        _running_processes.pop(job_id, None)
+        _process_ready_events.pop(job_id, None)
+
+    # ---- 5. Finalize cancellation ----
+    _finalize_cancellation(job_id)
+
+
+def _finalize_cancellation(job_id: str) -> None:
+    """
+    Idempotent finalization of a cancelled job.
+    - Settles quota (releases unused rows).
+    - Preserves partial output if any rows succeeded.
+    - Atomically marks job as 'cancelled' only if still 'cancelling'.
+    """
+    # ---- 1. Check status ----
+    job = job_service.get_job(job_id)
+    if not job:
+        logging.warning(f"Job {job_id} not found during cancellation finalization.")
+        return
+    if job.get("status") != "cancelling":
+        logging.info(f"Job {job_id} status is {job.get('status')}; skipping finalization.")
+        return
+
+    jobs_root = get_jobs_dir()
+    job_dir = jobs_root / job_id
+
+    # ---- 2. Count successful rows ----
+    successful_rows = _count_successful_rows_from_threads(job_dir)
+
+    # ---- 3. Settle quota (releases unused rows) ----
+    requested_rows = job.get("requested_rows", 0)
+    if requested_rows > 0:
+        try:
+            quota_service.settle_quota(job_id, requested_rows, successful_rows)
+        except Exception as exc:
+            logging.error(f"Quota settlement failed during cancellation for job {job_id}: {exc}")
+
+    # ---- 4. Finalize partial output (if any rows succeeded) ----
+    output_filename = job.get("output_filename")  # stored in job record
+    if output_filename and successful_rows > 0:
+        output_csv_path = job_dir / output_filename
+        if output_csv_path.is_file():
+            files_service.finalize_job_output(
+                job_id=job_id,
+                job_dir=job_dir,
+                output_filename=output_filename,
+                status="partial",
+                row_count=successful_rows,
+                base_name=output_filename,
+            )
+            # Optionally update job's output_file path (will be set in mark_cancelled_if_cancelling)
+            # We'll rely on mark_cancelled_if_cancelling to set output_file if needed.
+
+    # ---- 5. Atomically mark as cancelled ----
+    updated = job_service.mark_cancelled_if_cancelling(job_id, successful_rows)
+    if updated:
+        logging.info(f"Job {job_id} successfully cancelled with {successful_rows} rows processed.")
+    else:
+        logging.warning(f"Job {job_id} status changed before we could mark cancelled; may have been completed.")

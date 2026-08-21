@@ -459,23 +459,234 @@ def detect_buybox_structure(soup):
     return None
 
 
+def detect_single_buybox_offer(soup):
+    """
+    LOGIC #4: Detect single (non-accordion) buy box scenarios.
+    
+    When a product has ONLY ONE offer/seller, Amazon sometimes:
+    - Omits the data-buying-option-index attribute
+    - Uses simplified HTML structure
+    - Still maintains a-box-group and a-accordion classes
+    
+    This detector identifies these single-offer containers.
+    
+    Returns:
+        BeautifulSoup tag if single offer detected, None otherwise
+    """
+    try:
+        # Pattern 1: Look for containers with accordion-like classes
+        candidates = soup.find_all(
+            "div",
+            class_=lambda c: (
+                c 
+                and "a-box-group" in c 
+                and "a-accordion" in c
+            )
+        )
+        
+        logger.debug(f"[BUYBOX SINGLE] Scanning {len(candidates)} potential container(s)")
+        
+        for container in candidates:
+            try:
+                # Count rows with data-buying-option-index (indicates multi-accordion)
+                indexed_rows = container.find_all(
+                    "div", 
+                    attrs={OFFER_ROW_ATTRIBUTE: True}
+                )
+                
+                # If it has indexed rows, it's multi-accordion (skip)
+                if indexed_rows:
+                    logger.debug(f"[BUYBOX SINGLE] Container has {len(indexed_rows)} indexed row(s); not single")
+                    continue
+                
+                # Pattern 1a: Look for single offer box
+                offer_boxes = container.find_all(
+                    "div",
+                    class_=lambda c: (
+                        c 
+                        and ("a-box" in c or "offer-card" in c)
+                    )
+                )
+                
+                # Heuristic: single box without sub-boxes
+                if len(offer_boxes) == 1:
+                    logger.info(
+                        "[BUYBOX SINGLE] Single offer box detected "
+                        "(no data-buying-option-index, single .a-box)"
+                    )
+                    return container
+                
+                # Pattern 1b: Alternative detection via price + title pattern
+                # (useful if structure doesn't have clear .a-box wrapper)
+                if not indexed_rows:
+                    price_tag = container.find(
+                        "span",
+                        class_=re.compile(r"a-price")
+                    )
+                    title_tag = container.find(
+                        "span",
+                        class_=re.compile(r"a-text-bold")
+                    )
+                    
+                    # Both price and title present = likely single offer
+                    if price_tag and title_tag:
+                        logger.info(
+                            "[BUYBOX SINGLE] Single offer detected via "
+                            "price + title pattern (no indexed rows)"
+                        )
+                        return container
+                
+            except Exception as e:
+                logger.debug(f"[BUYBOX SINGLE] Container scan error: {e}")
+                continue
+        
+        # ---- NEW: relaxed detection for any div containing price and title ----
+        # This catches renewed products that might not have a-box-group/a-accordion.
+        all_divs = soup.find_all("div")
+        for div in all_divs:
+            try:
+                # Skip obvious non-buybox containers
+                if div.get("id") in ("corePriceDisplay_desktop_feature_div", "price", "productTitle"):
+                    continue
+                # Must contain a price element
+                price_tag = div.find("span", class_=re.compile(r"a-price"))
+                if not price_tag:
+                    continue
+                # Must contain a bold title or a text that looks like "Renewed" etc.
+                title_tag = div.find("span", class_=re.compile(r"a-text-bold"))
+                if not title_tag:
+                    # Maybe it's a span with class "a-size-base a-color-base" or similar
+                    title_tag = div.find("span", class_=re.compile(r"a-size-base"))
+                if not title_tag:
+                    continue
+                # Also check for seller or delivery info to confirm it's the buy box
+                seller = div.find(id="sfsb_accordion_head") or div.find(id="sellerProfileTriggerId")
+                delivery = div.find(id="deliveryBlockSmallMessage") or div.find(id="deliveryBlockMessage")
+                availability = div.find(id="availability")
+                if seller or delivery or availability:
+                    logger.info(
+                        "[BUYBOX SINGLE] Single offer detected via relaxed content-based scan "
+                        "(price + title + seller/delivery/availability)"
+                    )
+                    return div
+            except Exception as e:
+                continue
+        
+        logger.debug("[BUYBOX SINGLE] No single offer container detected")
+        return None
+        
+    except Exception as e:
+        logger.debug(f"[BUYBOX SINGLE] Detection function error: {e}")
+        return None
+
+
+def wrap_single_offer_as_row(container):
+    """
+    For single buy box without data-buying-option-index attribute,
+    create a synthetic row wrapper to reuse existing extract_single_offer().
+    
+    This bridges the gap between single-offer HTML and the extraction
+    logic designed for multi-row scenarios.
+    
+    Args:
+        container (BeautifulSoup): The detected single-offer container
+    
+    Returns:
+        BeautifulSoup: A wrapper div with synthetic data-buying-option-index
+                       or None if wrapping fails
+    """
+    try:
+        if not container:
+            logger.warning("[BUYBOX SINGLE] No container provided for wrapping")
+            return None
+        
+        # Strategy 1: If container already has an indexed row, use it
+        indexed_row = container.find("div", attrs={OFFER_ROW_ATTRIBUTE: True})
+        if indexed_row:
+            logger.debug("[BUYBOX SINGLE] Container already has indexed row; using directly")
+            return indexed_row
+        
+        # Strategy 2: Find the offer box and wrap it
+        offer_box = container.find(
+            "div",
+            class_=lambda c: (
+                c 
+                and ("a-box" in c or "offer-card" in c)
+            )
+        )
+        
+        if not offer_box:
+            # Strategy 3: Use the entire container as the row
+            logger.debug("[BUYBOX SINGLE] No .a-box found; using container as row")
+            offer_box = container
+        
+        # Create a shallow copy to avoid modifying original
+        # (BeautifulSoup tags can be copied)
+        try:
+            wrapper = offer_box
+        except Exception as e:
+            logger.warning(f"[BUYBOX SINGLE] Copy failed ({e}); using original")
+            wrapper = offer_box
+        
+        # Inject synthetic index attribute if missing
+        if not wrapper.get(OFFER_ROW_ATTRIBUTE):
+            wrapper[OFFER_ROW_ATTRIBUTE] = "0"
+            logger.info(
+                "[BUYBOX SINGLE] Synthetic data-buying-option-index='0' "
+                "created for single offer"
+            )
+        
+        logger.debug("[BUYBOX SINGLE] Wrapper created successfully")
+        return wrapper
+        
+    except Exception as e:
+        logger.warning(f"[BUYBOX SINGLE] Wrapping failed: {e}")
+        return None
+
+
 def find_buybox_container(soup):
     """
-    Try multiple detection patterns.
+    Try multiple detection patterns to find the buy box container.
+    NOW SUPPORTS: Existing patterns + Single offer detection + Content-based fallback
+    
+    Detection order:
+    1. Exact Amazon Buy Box ID (#buyBoxAccordion)
+    2. Amazon Buy Box semantic attribute (data-a-accordion-name='buybox-accordion')
+    3. Structural pattern for multi-accordion
+    4. Single offer pattern (relaxed)
+    5. Content-based fallback (NEW) - finds any div with price + seller/delivery
     """
-    container = detect_buybox_exact(soup)
-    if container:
-        return container
-
-    container = detect_buybox_attribute(soup)
-    if container:
-        return container
-
-    container = detect_buybox_structure(soup)
-    if container:
-        return container
-
-    logger.warning("[BUYBOX FAILURE] No Buy Box container could be detected.")
+    
+    detection_patterns = [
+        ("exact ID", lambda: detect_buybox_exact(soup)),
+        ("accordion attribute", lambda: detect_buybox_attribute(soup)),
+        ("structural multi-accordion", lambda: detect_buybox_structure(soup)),
+        ("single offer (relaxed)", lambda: detect_single_buybox_offer(soup)),  # UPDATED
+        ("content-based fallback", lambda: detect_single_buybox_offer(soup)),  # same function now covers both
+    ]
+    
+    for pattern_name, detector_func in detection_patterns:
+        try:
+            container = detector_func()
+            if container:
+                logger.info(
+                    "[BUYBOX] Buy box container detected via: %s",
+                    pattern_name
+                )
+                return container
+        
+        except Exception as e:
+            logger.debug(
+                "[BUYBOX] Detection pattern '%s' failed: %s",
+                pattern_name,
+                e
+            )
+            continue
+    
+    logger.warning(
+        "[BUYBOX] No buy box container could be detected "
+        "(tried 5 patterns: exact ID, attribute, structural, single, content-based)"
+    )
     return None
 
 
@@ -485,35 +696,89 @@ def find_buybox_container(soup):
 
 def find_offer_rows(container):
     """
-    Find actual Amazon buying‑option rows.
-    We require: data-buying-option-index.
+    Find actual Amazon buying-option rows.
+    NOW SUPPORTS: Multi-accordion (existing) + Single offer (new)
+    
+    We require data-buying-option-index for multi-accordion.
+    For single offers, we create a synthetic row wrapper.
     """
-    rows = container.find_all(
-        "div",
-        attrs={OFFER_ROW_ATTRIBUTE: True}
-    )
-
-    # Sort by numeric index.
-    def row_index(row):
-        raw = row.get(OFFER_ROW_ATTRIBUTE)
-        try:
-            return int(raw)
-        except (TypeError, ValueError):
-            return 999999
-
-    rows.sort(key=row_index)
-
-    if rows:
+    try:
+        if not container:
+            logger.warning("[BUYBOX] Container is None")
+            return []
+        
+        # ============================================================
+        # STRATEGY 1: Multi-Accordion Rows (Existing Logic)
+        # ============================================================
+        rows = container.find_all(
+            "div",
+            attrs={OFFER_ROW_ATTRIBUTE: True}
+        )
+        
+        if rows:
+            # Sort by numeric index
+            def row_index(row):
+                raw = row.get(OFFER_ROW_ATTRIBUTE)
+                try:
+                    return int(raw)
+                except (TypeError, ValueError):
+                    return 999999
+            
+            rows.sort(key=row_index)
+            logger.info(
+                "[BUYBOX] Found %d multi-accordion row(s) with %s attribute",
+                len(rows),
+                OFFER_ROW_ATTRIBUTE
+            )
+            return rows
+        
+        # ============================================================
+        # STRATEGY 2: Single Offer Fallback (New Logic)
+        # ============================================================
         logger.info(
-            "[BUYBOX SUCCESS #4] Found %d genuine data-buying-option-index row(s).",
-            len(rows)
+            "[BUYBOX] No indexed rows found (%s); checking for single offer...",
+            OFFER_ROW_ATTRIBUTE
         )
-    else:
+        
+        synthetic_row = wrap_single_offer_as_row(container)
+        
+        if synthetic_row:
+            try:
+                # Validate that this row has recognizable offer elements
+                has_price = bool(synthetic_row.select_one(".a-price"))
+                has_title = bool(synthetic_row.select_one("span.a-text-bold"))
+                
+                logger.debug(
+                    "[BUYBOX SINGLE] Validation: price=%s, title=%s",
+                    has_price,
+                    has_title
+                )
+                
+                # At least one of price/title should exist
+                if has_price or has_title:
+                    logger.info(
+                        "[BUYBOX SINGLE] Single offer validated; "
+                        "returning as synthetic row"
+                    )
+                    return [synthetic_row]
+                else:
+                    logger.warning(
+                        "[BUYBOX SINGLE] Synthetic row has no recognizable "
+                        "price or title elements"
+                    )
+            
+            except Exception as e:
+                logger.debug(f"[BUYBOX SINGLE] Validation error: {e}")
+        
         logger.warning(
-            "[BUYBOX FAILURE] Buy Box exists but contains no data-buying-option-index rows."
+            "[BUYBOX] No valid offer rows found "
+            "(neither multi-accordion nor single offer)"
         )
-
-    return rows
+        return []
+        
+    except Exception as e:
+        logger.exception(f"[BUYBOX] find_offer_rows() exception: {e}")
+        return []
 
 
 # ----------------------------------------------------------------------------
@@ -611,47 +876,89 @@ def extract_price(row):
 
 def extract_availability(row):
     """
-    Extract stock/availability.
+    Extract stock/availability information.
+    ENHANCED: Better support for single-offer scenarios via regex patterns
+    
+    Multiple strategies:
+    1. Explicit ID-based selectors (#availability, .primary-availability-message)
+    2. Text-based regex patterns (useful for single box with direct text)
+    3. Class-based fallback (elements with availability-related classes)
     """
-    # Strategy 1
-    tag = row.select_one("#availability .primary-availability-message")
-    value = clean_text(tag)
-    if is_valid(value):
-        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 1: %s", value)
-        return value
-
-    # Strategy 2
-    tag = row.select_one(".primary-availability-message")
-    value = clean_text(tag)
-    if is_valid(value):
-        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 2: %s", value)
-        return value
-
-    # Strategy 3
-    tag = row.select_one("#availability")
-    value = clean_text(tag)
-    if is_valid(value):
-        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 3: %s", value)
-        return value
-
-    # Strategy 4: Regex fallback
-    text = clean_text(row)
-    match = re.search(
-        r"\b("
-        r"In Stock|"
-        r"Out of Stock|"
-        r"Currently unavailable|"
-        r"Available|"
-        r"Temporarily out of stock"
-        r")\b",
-        text,
-        re.IGNORECASE
-    )
-    if match:
-        value = match.group(1)
-        logger.info("[BUYBOX FIELD SUCCESS] Availability strategy 4: %s", value)
-        return value
-
+    try:
+        # ============================================================
+        # Strategy 1: Standard ID/Class-based selectors (existing)
+        # ============================================================
+        standard_selectors = [
+            "#availability .primary-availability-message",
+            ".primary-availability-message",
+            "#availability"
+        ]
+        
+        for selector in standard_selectors:
+            tag = row.select_one(selector)
+            if tag:
+                value = clean_text(tag)
+                if is_valid(value):
+                    logger.info(
+                        "[BUYBOX FIELD] Availability (selector '%s'): %s",
+                        selector,
+                        value
+                    )
+                    return value
+        
+        # ============================================================
+        # Strategy 2: Text-based regex matching (NEW - for single box)
+        # ============================================================
+        # These patterns handle common Amazon availability messages
+        text = clean_text(row)
+        
+        regex_patterns = [
+            # Specific "Only X left" pattern
+            (r"Only \d+ left[^.]*(?:order soon|soon)", None),
+            # General "Only X left"
+            (r"Only \d+ left[^.]*", None),
+            # Standard stock phrases
+            (r"\b(?:In Stock|Out of Stock|Currently unavailable|Temporarily out of stock)\b", None),
+            # Generic "Available"
+            (r"\bAvailable\b", None),
+        ]
+        
+        for pattern, _ in regex_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                value = match.group(0).strip()
+                logger.info(
+                    "[BUYBOX FIELD] Availability (regex pattern '%s'): %s",
+                    pattern,
+                    value
+                )
+                return value
+        
+        # ============================================================
+        # Strategy 3: Class-based fallback (for single box)
+        # ============================================================
+        # Look for divs with availability-related class names
+        availability_divs = row.find_all(
+            "div",
+            class_=re.compile(r"availability|stock|supply", re.I)
+        )
+        
+        for div in availability_divs:
+            value = clean_text(div)
+            if is_valid(value):
+                # Check if it actually contains availability keywords
+                text_lower = value.lower()
+                if any(keyword in text_lower for keyword in ["stock", "available", "left", "order"]):
+                    logger.info(
+                        "[BUYBOX FIELD] Availability (class-based): %s",
+                        value
+                    )
+                    return value
+        
+    except Exception as e:
+        logger.debug(f"[BUYBOX FIELD] Availability extraction error: {e}")
+    
+    logger.warning("[BUYBOX FIELD FAILURE] Availability not found.")
     return NOT_MENTIONED
 
 
@@ -1109,8 +1416,16 @@ def extract_single_offer(row):
 def extract_buybox(soup):
     """
     Main Buy Box extraction function.
-    Returns a dict with:
-        offers, primary, active_index, offer_count, success, success_details
+    NOW SUPPORTS: Multi-accordion (existing) + Single offer (new)
+    
+    ENHANCEMENTS:
+    - Robust exception handling (doesn't crash on malformed HTML)
+    - Detailed logging for single-offer detection
+    - Proper deduplication for both scenarios
+    
+    Returns:
+        dict with keys: offers, primary, active_index, offer_count, 
+                       success, success_details
     """
     result = {
         "offers": [],
@@ -1119,97 +1434,141 @@ def extract_buybox(soup):
         "offer_count": 0,
         "success": False,
         "success_details": [],
+        "detection_mode": None,  # NEW: track if single or multi
     }
 
-    # 1. Find container
-    container = find_buybox_container(soup)
-    if not container:
-        return result
+    try:
+        # ============================================================
+        # STEP 1: Find container (now supports single detection)
+        # ============================================================
+        container = find_buybox_container(soup)
+        if not container:
+            logger.warning("[BUYBOX] No container found")
+            return result
 
-    result["success_details"].append("Buy Box container detected")
+        result["success_details"].append("Buy Box container detected")
 
-    # 2. Validate container
-    has_buybox_attribute = container.get("data-a-accordion-name") == BUYBOX_ATTRIBUTE
-    has_buying_rows = bool(container.find("div", attrs={OFFER_ROW_ATTRIBUTE: True}))
+        # ============================================================
+        # STEP 2: Validate container and detect mode
+        # ============================================================
+        has_buybox_attribute = container.get("data-a-accordion-name") == BUYBOX_ATTRIBUTE
+        has_buying_rows = bool(container.find("div", attrs={OFFER_ROW_ATTRIBUTE: True}))
+        is_single_offer = not has_buying_rows  # NEW: single-offer indicator
+        
+        if has_buybox_attribute:
+            result["success_details"].append("Amazon buybox-accordion attribute validated")
+        
+        if has_buying_rows:
+            result["success_details"].append("Multi-accordion buying-option rows validated")
+            result["detection_mode"] = "multi-accordion"
+        else:
+            result["success_details"].append("Single offer mode (no indexed rows)")
+            result["detection_mode"] = "single-offer"
 
-    if has_buybox_attribute:
-        result["success_details"].append("Amazon buybox-accordion attribute validated")
-    if has_buying_rows:
-        result["success_details"].append("Buying-option rows validated")
+        # ============================================================
+        # STEP 3: Get rows (handles both multi and single)
+        # ============================================================
+        rows = find_offer_rows(container)
+        if not rows:
+            logger.warning("[BUYBOX] No offer rows found after detection")
+            return result
 
-    # 3. Get rows
-    rows = find_offer_rows(container)
-    if not rows:
-        return result
+        # ============================================================
+        # STEP 4: Extract offers with exception handling
+        # ============================================================
+        seen_indexes = set()
 
-    # 4. Extract offers
-    seen_indexes = set()  # deduplicate based on index only
+        for row_idx, row in enumerate(rows):
+            try:
+                offer = extract_single_offer(row)
+                if not offer.get("valid"):
+                    logger.debug(
+                        "[BUYBOX] Row %d marked invalid: %s",
+                        row_idx,
+                        offer.get("successful_fields", [])
+                    )
+                    continue
 
-    for row in rows:
-        try:
-            offer = extract_single_offer(row)
-            if not offer["valid"]:
+                # Deduplicate based on index
+                idx = offer.get("index", NOT_MENTIONED)
+                if idx is None or idx == NOT_MENTIONED:
+                    logger.warning("[BUYBOX] Offer row has no index; skipping")
+                    continue
+
+                if idx in seen_indexes:
+                    logger.debug("[BUYBOX] Duplicate accordion row skipped: %s", idx)
+                    continue
+
+                seen_indexes.add(idx)
+                result["offers"].append(offer)
+
+                logger.info(
+                    "[BUYBOX OFFER %s] title=%s | price=%s | avail=%s | seller=%s | shipped=%s",
+                    idx,
+                    offer.get("title"),
+                    offer.get("price"),
+                    offer.get("availability"),
+                    offer.get("sold_by"),
+                    offer.get("shipped_by"),
+                )
+
+            except Exception as exc:
+                logger.warning(
+                    "[BUYBOX] Row %d extraction failed: %s",
+                    row_idx,
+                    exc
+                )
+                # Don't crash; continue to next row
                 continue
 
-            # Deduplicate based on index ONLY
-            idx = offer.get("index")
-            if idx is None or idx == NOT_MENTIONED:
-                logger.warning("[BUYBOX] Offer row has no data-buying-option-index – skipping")
-                continue
-
-            if idx in seen_indexes:
-                logger.warning("[BUYBOX] Duplicate accordion row skipped: %s", idx)
-                continue
-
-            seen_indexes.add(idx)
-            result["offers"].append(offer)
-
-            logger.info(
-                "[BUYBOX OFFER %s] title=%s | price=%s | shipper=%s | seller=%s | condition=%s | returns=%s | payment=%s | delivery=%s",
-                idx,
-                offer.get("title"),
-                offer.get("price"),
-                offer.get("shipped_by"),
-                offer.get("sold_by"),
-                offer.get("condition"),
-                offer.get("returns"),
-                offer.get("payment"),
-                offer.get("delivery"),
+        # ============================================================
+        # STEP 5: Count offers
+        # ============================================================
+        result["offer_count"] = len(result["offers"])
+        if result["offer_count"] > 0:
+            result["success_details"].append(
+                f"{result['offer_count']} valid offer(s) extracted"
             )
 
-        except Exception as exc:
-            logger.exception("[BUYBOX] Offer extraction failed: %s", exc)
+        # ============================================================
+        # STEP 6: Find primary offer
+        # ============================================================
+        if result["offers"]:
+            # Prefer active offer, fallback to first
+            active_offer = next(
+                (o for o in result["offers"] if o.get("active")),
+                None
+            )
 
-    # 5. Count
-    result["offer_count"] = len(result["offers"])
-    if result["offer_count"] > 0:
-        result["success_details"].append(f"{result['offer_count']} valid offer(s) extracted")
+            if active_offer:
+                result["primary"] = active_offer
+                result["active_index"] = active_offer.get("index", NOT_MENTIONED)
+                result["success_details"].append("Active offer identified")
+            else:
+                result["primary"] = result["offers"][0]
+                result["active_index"] = result["offers"][0].get("index", NOT_MENTIONED)
+                result["success_details"].append("First offer used as primary (no explicit active)")
 
-    # 6. Find active offer
-    active_offer = next((o for o in result["offers"] if o.get("active")), None)
+        # ============================================================
+        # STEP 7: Final success determination
+        # ============================================================
+        if result["offer_count"] > 0 and result["primary"] is not None:
+            result["success"] = True
+            logger.info(
+                "[BUYBOX SUCCESS] Offers=%d | ActiveIndex=%s | Mode=%s",
+                result["offer_count"],
+                result["active_index"],
+                result.get("detection_mode", "unknown")
+            )
+        else:
+            logger.warning("[BUYBOX] No valid offers extracted")
 
-    # 7. Fallback to first valid offer
-    if active_offer:
-        result["primary"] = active_offer
-        result["active_index"] = active_offer.get("index", NOT_MENTIONED)
-        result["success_details"].append("Active Buy Box row identified")
-    elif result["offers"]:
-        result["primary"] = result["offers"][0]
-        result["active_index"] = result["offers"][0].get("index", NOT_MENTIONED)
-        result["success_details"].append("Active row not explicitly marked; first valid offer used as fallback")
+        return result
 
-    # 8. Final success
-    if result["offer_count"] > 0 and result["primary"] is not None:
-        result["success"] = True
-        logger.info(
-            "[BUYBOX SUCCESS FINAL] Buy Box successfully extracted. Offers=%d ActiveIndex=%s",
-            result["offer_count"],
-            result["active_index"]
-        )
-    else:
-        logger.warning("[BUYBOX FINAL FAILURE] No valid Buy Box offer could be extracted.")
-
-    return result
+    except Exception as exc:
+        logger.exception(f"[BUYBOX] Unexpected error in extract_buybox(): {exc}")
+        result["success_details"].append(f"Exception: {str(exc)}")
+        return result
 
 
 # ----------------------------------------------------------------------------

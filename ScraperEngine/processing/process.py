@@ -191,7 +191,7 @@ def extract_price_info(content, symbol='$'):
             'rrp', 'list price', 'typical price', 'typical value',
             'list value', 'was', 'msrp', 'original price',
             'suggested retail price', 'bundle list price',
-            'lowest price in 30 days', 'one-time price'
+            'lowest price in 30 days', 'one-time price', 'new price','sale price','mark price','old price'
         ]
 
         match = re.search(repeated_pattern, content)
@@ -403,6 +403,7 @@ def process_data(
             'Display Features',
             'Price Box',
             'Product Information',
+            'Display Features 1'
         ]
 
         dataframe.drop(
@@ -434,6 +435,20 @@ def process_data(
                 columns=rename_map,
                 inplace=True
             )
+
+        # -----------------------------------------------------------
+        # NEW: Rename BuyBox columns to user-friendly names
+        # -----------------------------------------------------------
+        buybox_rename_map = {
+            'BuyBox_Offers': 'BuyBox Offer(s)',
+            'BuyBox_Offer_Count': 'BuyBox Offer Count',
+            'BuyBox_Prices': 'BuyBox Price(s)',
+            'BuyBox_Sellers': 'BuyBox Seller(s)',
+            'BuyBox Formatted Offers': 'BuyBox Formatted Offer(s)',
+        }
+        for old, new in buybox_rename_map.items():
+            if old in dataframe.columns:
+                dataframe.rename(columns={old: new}, inplace=True)
 
         # -----------------------------------------------------------
         # FINAL ABOUT THIS ITEM REPAIR

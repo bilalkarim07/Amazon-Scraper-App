@@ -16,6 +16,7 @@ import {
   Plus,
   Trash2,
   Info,
+  Pencil,
 } from "lucide-react";
 import { toast } from "sonner";
 import { useScrape } from "../lib/scrape-store";
@@ -1002,12 +1003,14 @@ function ScrapeNew() {
                     error={errors.keywords}
                     tooltip="List of additional data fields to extract from the product page. Separate with commas."
                   >
-                    <input
+                    <KeywordsEditor
                       value={keywords}
+                      onChange={(val) => {
+                        setKeywords(val);
+                        setErrors((prev) => ({ ...prev, keywords: undefined }));
+                      }}
                       disabled={processing}
-                      onChange={(e) => setKeywords(e.target.value)}
-                      placeholder="UPC,ASIN,Model Product Information"
-                      className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
+                      placeholder="UPC, ASIN, Model Product Information"
                     />
                   </Field>
 
@@ -1028,20 +1031,6 @@ function ScrapeNew() {
                         placeholder="my_scraped_data.csv"
                         className="w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60"
                       />
-                      {fileInfo && !outputTouched && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            const base = defaultOutputName(fileInfo.name);
-                            const unique = getUniqueOutputName(base);
-                            setOutputName(unique);
-                            setOutputTouched(false);
-                          }}
-                          className="rounded-lg border-2 px-3 py-2 text-xs press"
-                        >
-                          Reset
-                        </button>
-                      )}
                     </div>
                   </Field>
                 </div>
@@ -1285,17 +1274,14 @@ function ScrapeNew() {
                     label="Keywords (optional)"
                     tooltip="Comma-separated list of additional data to extract (max 10). Example: UPC, ASIN, Brand"
                   />
-                  <input
+                  <KeywordsEditor
                     value={keywords}
-                    disabled={processing}
-                    onChange={(e) => {
-                      setKeywords(e.target.value);
-                      setQuickErrors(prev => ({ ...prev, keywords: undefined }));
+                    onChange={(val) => {
+                      setKeywords(val);
+                      setQuickErrors((prev) => ({ ...prev, keywords: undefined }));
                     }}
-                    placeholder="UPC,ASIN,Model"
-                    className={`w-full rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] disabled:opacity-60 ${
-                      quickErrors.keywords ? "border-destructive" : ""
-                    }`}
+                    disabled={processing}
+                    placeholder="UPC, ASIN, Model"
                   />
                   {quickErrors.keywords && (
                     <p className="mt-1 text-xs font-semibold text-destructive">{quickErrors.keywords}</p>
@@ -1480,4 +1466,148 @@ function Field({
 function FieldError({ msg }: { msg?: string | undefined }) {
   if (!msg) return null;
   return <p className="mt-1 text-xs font-semibold text-destructive">{msg}</p>;
+}
+
+// ---- Keywords Editor Component ----
+function KeywordsEditor({
+  value,
+  onChange,
+  disabled,
+  placeholder,
+}: {
+  value: string;
+  onChange: (val: string) => void;
+  disabled?: boolean;
+  placeholder?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [tags, setTags] = useState<string[]>([]);
+  const [newTag, setNewTag] = useState("");
+  const [error, setError] = useState("");
+
+  // Parse current value into tags when dialog opens
+  useEffect(() => {
+    if (open) {
+      const parsed = value.split(",").map((s) => s.trim()).filter(Boolean);
+      setTags(parsed);
+      setNewTag("");
+      setError("");
+    }
+  }, [open, value]);
+
+  const addTag = () => {
+    const trimmed = newTag.trim();
+    if (!trimmed) {
+      setError("Tag cannot be empty");
+      return;
+    }
+    if (tags.includes(trimmed)) {
+      setError("Tag already exists");
+      return;
+    }
+    if (tags.length >= 10) {
+      setError("Maximum 10 tags allowed");
+      return;
+    }
+    const newTags = [...tags, trimmed];
+    setTags(newTags);
+    onChange(newTags.join(", "));
+    setNewTag("");
+    setError("");
+  };
+
+  const removeTag = (tagToRemove: string) => {
+    const newTags = tags.filter((t) => t !== tagToRemove);
+    setTags(newTags);
+    onChange(newTags.join(", "));
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      e.preventDefault();
+      addTag();
+    }
+  };
+
+  const displayText = tags.length
+    ? tags.join(", ")
+    : placeholder || "Add keywords…";
+
+  return (
+    <>
+      <div
+        onClick={() => !disabled && setOpen(true)}
+        className={`flex w-full items-center justify-between rounded-lg border-2 bg-background px-3 py-2 text-sm font-medium outline-none focus:shadow-[2px_2px_0_0_var(--ink)] ${
+          disabled ? "opacity-60 cursor-not-allowed" : "cursor-pointer hover:bg-muted/50"
+        }`}
+      >
+        <span className="truncate text-muted-foreground">{displayText}</span>
+        <Pencil className="h-4 w-4 text-muted-foreground" />
+      </div>
+
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-w-md max-h-[90vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle>Manage Keywords</DialogTitle>
+          </DialogHeader>
+
+          <ScrollArea className="flex-1 pr-4">
+            <div className="space-y-2">
+              {tags.length === 0 && (
+                <p className="text-sm text-muted-foreground">No keywords added yet.</p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                {tags.map((tag) => (
+                  <div
+                    key={tag}
+                    className="flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-sm"
+                  >
+                    <span>{tag}</span>
+                    <button
+                      type="button"
+                      onClick={() => removeTag(tag)}
+                      className="text-muted-foreground hover:text-foreground"
+                      disabled={disabled}
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <Input
+                  value={newTag}
+                  onChange={(e) => setNewTag(e.target.value)}
+                  onKeyDown={handleKeyDown}
+                  placeholder="Enter a keyword…"
+                  disabled={disabled || tags.length >= 10}
+                  className="flex-1"
+                />
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={addTag}
+                  disabled={disabled || tags.length >= 10 || !newTag.trim()}
+                >
+                  Add
+                </Button>
+              </div>
+
+              {error && (
+                <p className="text-xs font-semibold text-destructive">{error}</p>
+              )}
+              <p className="text-xs text-muted-foreground">
+                {tags.length} of 10 keywords added. Optional.
+              </p>
+            </div>
+          </ScrollArea>
+
+          <DialogFooter>
+            <Button onClick={() => setOpen(false)}>Done</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
 }

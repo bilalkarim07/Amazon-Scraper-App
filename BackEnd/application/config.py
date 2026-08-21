@@ -38,3 +38,6 @@ CORS_ORIGINS: list[str] = [
 
 # --- Quota ---
 DAILY_QUOTA_LIMIT = int(os.environ.get("DAILY_QUOTA_LIMIT", 2000))
+
+# --- Cancellation grace period (seconds) ---
+CANCELLATION_GRACE_PERIOD = int(os.environ.get("CANCELLATION_GRACE_PERIOD", 30))
